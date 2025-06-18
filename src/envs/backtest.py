@@ -6,7 +6,7 @@ import matplotlib.dates as mdates
 import seaborn as sns
 from stable_baselines3 import TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from Environment.New_Trading_Env import MultiStockTradingEnv
+from src.envs.trading_env import MultiStockTradingEnv
 
 class TD3Backtester:
     def __init__(self, model_path, env_path, output_dir):

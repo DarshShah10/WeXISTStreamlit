@@ -386,4 +386,115 @@ if __name__ == "__main__":
     # For this subtask, we are just creating test.py structure.
     # The dummy file creation in the original prompt for test.py was very minimal.
     # We will rely on the dummies created in the previous "test run of train.py" task.
-    main()
+    # main() # Comment out old main call, will be replaced by new CLI logic if file is run directly
+    pass # Placeholder if __main__ block becomes empty after commenting out main()
+
+# def plot_performance(portfolio_df): # Commented out as per instructions
+#     try:
+#         import matplotlib.pyplot as plt
+#         plt.figure(figsize=(12, 6))
+#         plt.plot(portfolio_df.index, portfolio_df.values)
+#         plt.title("Portfolio Value Over Time")
+#         plt.xlabel("Time Steps")
+#         plt.ylabel("Portfolio Value ($)")
+#         plt.grid(True)
+#
+#         plot_filename = "portfolio_performance.png"
+#         plt.savefig(plot_filename)
+#         print(f"\nPlot saved to {plot_filename}")
+#         # plt.show() # This would block in a script; saving is better.
+#     except ImportError:
+#         print("\nMatplotlib not found. Skipping plot generation. Install with: pip install matplotlib")
+#     except Exception as e:
+#         print(f"Error during plotting: {e}")
+
+def main_cli():
+    parser = argparse.ArgumentParser(description="Test a trained stock trading RL model.")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the model .zip file.")
+    parser.add_argument("--data_path", type=str, required=True, help="Path to the test data CSV file.")
+    parser.add_argument("--tickers", type=str, required=True, help="Comma-separated list of stock tickers relevant to the data file (e.g., 'AAPL,MSFT,GOOG').")
+    # Removed --skip_plot argument
+
+    args = parser.parse_args()
+
+    selected_model_info = {
+        "model_path": args.model_path,
+        "stats_path": args.model_path.replace(".zip", "_vecnormalize.pkl")
+    }
+    if not os.path.exists(selected_model_info["model_path"]):
+        print(f"Error: Model file not found at {selected_model_info['model_path']}")
+        return
+    if not os.path.exists(selected_model_info["stats_path"]):
+        print(f"Warning: VecNormalize file not found at {selected_model_info['stats_path']}. Proceeding without it.")
+        selected_model_info["stats_path"] = None
+
+    print(f"\n--- Loading Test Data from: {args.data_path} ---")
+    if not os.path.exists(args.data_path):
+        print(f"Error: Test data file not found at {args.data_path}")
+        return
+
+    test_df = pd.read_csv(args.data_path)
+    if "Date" in test_df.columns: # Ensure 'Date' column exists before using it
+        test_df["Date"] = pd.to_datetime(test_df["Date"])
+        test_df.set_index("Date", inplace=True)
+    else:
+        print("Warning: 'Date' column not found in the data. Using default integer index.")
+
+
+    parsed_tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',') if ticker.strip()]
+    if not parsed_tickers_list:
+        print("Error: No tickers provided or tickers string is empty.")
+        return
+    num_stocks_for_env = len(parsed_tickers_list)
+    print(f"Number of stocks determined from tickers: {num_stocks_for_env}")
+
+    if test_df.empty:
+        print("Test data is empty. Cannot proceed.")
+        return
+
+    # --- 2. Load Model and Environment ---
+    try:
+        model, test_env = load_model_and_env(selected_model_info, test_df, num_stocks_for_env)
+    except Exception as e:
+        print(f"Error loading model or environment: {e}")
+        raise
+        return
+
+    # --- 3. Run Evaluation ---
+    portfolio_values, daily_returns = run_evaluation(model, test_env, test_df)
+
+    # --- 4. Calculate and Display Metrics ---
+    metrics, portfolio_df_series = calculate_metrics(portfolio_values, daily_returns)
+
+    # --- 5. Plotting removed from CLI main ---
+    # if not args.skip_plot: # skip_plot arg removed
+    #     if not portfolio_df_series.empty:
+    #         plot_performance(portfolio_df_series) # plot_performance function removed/commented
+    #     else:
+    #         print("Portfolio data is empty, skipping plot.")
+
+    print("\n--- Testing Finished (CLI Mode) ---")
+
+if __name__ == "__main__":
+    # Ensure dummy files for DataPreprocessingPipeline components exist for prepare_data call
+    # This is a simplified version of what train.py does.
+    # If train.py has run successfully, these may not be strictly necessary
+    # if the actual components are functional.
+    # However, to make test.py runnable independently for basic checks if data is missing:
+    # required_preprocessing_files = [
+    #     "src/data_preprocessing/CollectData.py",
+    #     "src/data_preprocessing/PreProcess.py",
+    #     "src/data_preprocessing/FeatureEngineer.py",
+    #     "src/data_preprocessing/Post_Process_Features.py",
+    #     "src/data_preprocessing/Download_Macro.py",
+    #     "src/data_preprocessing/PreProcessMacro.py",
+    #     "src/data_preprocessing/CombineDf.py"
+    # ]
+    # This logic was in train.py; it's good practice for test.py to not mandate it
+    # and assume that if prepare_data is called, the actual (or sufficiently dummied)
+    # pipeline components are available. The previous subtask (test run of train.py)
+    # already created more robust dummies.
+    # For this subtask, we are just creating test.py structure.
+    # The dummy file creation in the original prompt for test.py was very minimal.
+    # We will rely on the dummies created in the previous "test run of train.py" task.
+    main_cli() # Call the new CLI main

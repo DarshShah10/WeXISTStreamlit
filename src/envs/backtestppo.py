@@ -5,8 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-# from Environment.New_Trading_Env import MultiStockTradingEnv
-from New_Trading_Env import MultiStockTradingEnv
+from src.envs.trading_env import MultiStockTradingEnv
 
 class RecurrentPPOBacktester:
     def __init__(self, model_path, env_path, output_dir):

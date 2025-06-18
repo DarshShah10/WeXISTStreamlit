@@ -4,6 +4,8 @@ import glob
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import plotly.express as px # Added for Plotly plots
+import plotly.graph_objects as go # Added for Plotly plots
 
 # Stable Baselines3 components
 from stable_baselines3 import PPO, A2C, TD3, DDPG
@@ -16,6 +18,7 @@ from src.envs.trading_env import MultiStockTradingEnv
 # Import functions from train.py and test.py carefully
 from train import (
     create_env,
+    run_training_programmatically, # Added for model training tab
     DEFAULT_TICKER_LIST as TRAIN_DEFAULT_TICKERS,
     INITIAL_AMOUNT as TRAIN_INITIAL_AMOUNT,
     BUY_COST_PCT as TRAIN_BUY_COST_PCT,
@@ -120,6 +123,8 @@ if "processed_data_df" not in st.session_state:
     st.session_state.processed_data_df = None
 if "backtest_results" not in st.session_state:
     st.session_state.backtest_results = None
+if "processed_train_data_path" not in st.session_state: # New session state for data processing tab
+    st.session_state.processed_train_data_path = None
 
 st.sidebar.header("⚙️ Configuration")
 available_models = list_streamlit_models(MODEL_SAVE_DIR)
@@ -153,9 +158,187 @@ with col1:
 with col2:
     end_date = st.date_input("End Date", value=default_end, key="sb_end_date")
 
-tab_inference, tab_model_info = st.tabs(["📊 Inference & Backtesting", "ℹ️ Model & Environment Info"])
+# Main application tabs
+tab_data_processing, tab_model_training, tab_inference_backtesting, tab_model_info = st.tabs([
+    "🛠️ Data Processing",
+    "🧠 Model Training",
+    "📊 Inference & Backtesting",
+    "ℹ️ Model & Environment Info"
+])
 
-with tab_inference:
+with tab_data_processing:
+    st.header("Data Processing Pipeline")
+    st.markdown("""
+    Use this section to process historical market data for a list of stock tickers.
+    The processed data will be saved as a CSV file and can be used for training new models
+    or other analyses.
+    """)
+
+    dp_user_tickers_str = st.text_input(
+        "Enter Stock Tickers for Processing (comma-separated)",
+        value=", ".join(TRAIN_DEFAULT_TICKERS[:5]) if TRAIN_DEFAULT_TICKERS else "RELIANCE.NS,TCS.NS,INFY.NS",
+        key="dp_tickers"
+    )
+    dp_selected_tickers = [ticker.strip().upper() for ticker in dp_user_tickers_str.split(",") if ticker.strip()]
+
+    dp_col1, dp_col2 = st.columns(2)
+    with dp_col1:
+        dp_start_date = st.date_input(
+            "Start Date for Processing",
+            value=datetime.now() - timedelta(days=5*365), # Longer default for training data
+            key="dp_start_date"
+        )
+    with dp_col2:
+        dp_end_date = st.date_input(
+            "End Date for Processing",
+            value=datetime.now() - timedelta(days=1),
+            key="dp_end_date"
+        )
+
+    if st.button("⚙️ Process Market Data", key="btn_process_market_data"):
+        if not dp_selected_tickers:
+            st.warning("Please enter at least one stock ticker for processing.")
+        elif dp_start_date >= dp_end_date:
+            st.error("Error: Start date must be before end date for processing.")
+        else:
+            with st.spinner(f"Processing data for: {', '.join(dp_selected_tickers)}..."):
+                try:
+                    os.makedirs(APP_TEMP_DATA_DIR, exist_ok=True)
+                    # Ensure tickers in filename are sorted for consistency
+                    sorted_dp_tickers_str = "_".join(sorted(dp_selected_tickers))
+                    output_filename = f"processed_training_data_{sorted_dp_tickers_str}_{dp_start_date.strftime('%Y%m%d')}_{dp_end_date.strftime('%Y%m%d')}.csv"
+                    output_csv_path = os.path.join(APP_TEMP_DATA_DIR, output_filename)
+
+                    pipeline = StockPreProcessPipeline()
+                    processed_path = pipeline.run_data_pipeline(
+                        dp_selected_tickers,
+                        dp_start_date.strftime('%Y-%m-%d'),
+                        dp_end_date.strftime('%Y-%m-%d'),
+                        output_csv_path
+                    )
+                    st.session_state.processed_train_data_path = processed_path
+                    st.success(f"Market data processed successfully for {len(dp_selected_tickers)} tickers!")
+                    st.info(f"Processed data saved to: {processed_path}")
+
+                    # Optionally display a sample of the processed data
+                    # df_sample = pd.read_csv(processed_path, nrows=5)
+                    # st.dataframe(df_sample)
+
+                except Exception as e:
+                    st.error(f"Error during data processing: {e}")
+                    st.exception(e)
+
+    if st.session_state.processed_train_data_path:
+        st.markdown(f"**Last processed training data path:** `{st.session_state.processed_train_data_path}`")
+        # Add a button to download this data?
+        # with open(st.session_state.processed_train_data_path, "rb") as fp:
+        #     st.download_button(
+        #         label="Download Processed Data (CSV)",
+        #         data=fp,
+        #         file_name=os.path.basename(st.session_state.processed_train_data_path),
+        #         mime="text/csv"
+        #     )
+
+with tab_model_training:
+    st.header("Train a New RL Model")
+    st.markdown("""
+    Configure the parameters below and start the training process.
+    The trained model will be saved and can be selected from the sidebar for inference.
+    """)
+
+    train_algo_options = ["PPO", "A2C", "TD3", "DDPG", "RecurrentPPO"]
+    train_selected_algo = st.selectbox(
+        "Select Algorithm for Training",
+        options=train_algo_options,
+        index=0,
+        key="train_algo_select"
+    )
+
+    train_tickers_str = st.text_input(
+        "Stock Tickers for Training (comma-separated)",
+        value=", ".join(TRAIN_DEFAULT_TICKERS[:5]) if TRAIN_DEFAULT_TICKERS else "RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS,ICICIBANK.NS",
+        key="train_tickers"
+    )
+    train_selected_tickers = [ticker.strip().upper() for ticker in train_tickers_str.split(",") if ticker.strip()]
+
+    train_col1, train_col2, train_col3 = st.columns(3)
+    with train_col1:
+        train_start_date = st.date_input(
+            "Training Start Date",
+            value=datetime.now() - timedelta(days=4*365), # Default: 4 years back
+            key="train_start_date"
+        )
+    with train_col2:
+        train_end_date = st.date_input(
+            "Training End Date (for train data)",
+            value=datetime.now() - timedelta(days=1*365), # Default: 1 year back (this is end of training period)
+            key="train_end_date"
+        )
+    with train_col3:
+        train_test_end_date = st.date_input(
+            "Test Data End Date (for eval during training)",
+            value=datetime.now() - timedelta(days=1), # Default: yesterday (this is end of test/eval period)
+            key="train_test_end_date"
+        )
+
+    train_total_timesteps = st.number_input(
+        "Total Training Timesteps",
+        min_value=1000,
+        value=50000, # Default from train.py
+        step=1000,
+        key="train_timesteps",
+        help="Number of steps the agent interacts with the environment during training."
+    )
+
+    train_model_tag = st.text_input(
+        "Model Name Tag (Optional)",
+        key="train_model_tag",
+        placeholder="e.g., my_ppo_run_1",
+        help="A custom tag to include in the saved model's filename."
+    )
+
+    if st.button("🚀 Start Training", key="btn_start_training"):
+        if not train_selected_tickers:
+            st.warning("Please enter at least one stock ticker for training.")
+        elif not train_selected_algo:
+            st.warning("Please select an algorithm.")
+        elif train_start_date >= train_end_date:
+            st.error("Error: Training Start Date must be before Training End Date.")
+        elif train_end_date >= train_test_end_date:
+            st.error("Error: Training End Date must be before Test Data End Date.")
+        else:
+            st.info(f"Starting training for {train_selected_algo} with tickers: {', '.join(train_selected_tickers)}.")
+            st.info(f"Training data: {train_start_date.strftime('%Y-%m-%d')} to {train_end_date.strftime('%Y-%m-%d')}")
+            st.info(f"Evaluation data (during training): {train_end_date.strftime('%Y-%m-%d')} to {train_test_end_date.strftime('%Y-%m-%d')}")
+            st.info(f"Total timesteps: {train_total_timesteps}. Model tag: '{train_model_tag}'.")
+
+            with st.spinner(f"Training {train_selected_algo} model... This may take a while. Check your terminal/console for detailed logs."):
+                try:
+                    # Ensure dates are strings
+                    start_date_str = train_start_date.strftime('%Y-%m-%d')
+                    end_date_str = train_end_date.strftime('%Y-%m-%d')
+                    test_end_date_str = train_test_end_date.strftime('%Y-%m-%d')
+
+                    saved_model_path = run_training_programmatically(
+                        selected_algo_name_param=train_selected_algo,
+                        ticker_list_param=train_selected_tickers,
+                        start_date_param=start_date_str,
+                        end_date_param=end_date_str,
+                        test_end_date_param=test_end_date_str,
+                        total_timesteps_param=int(train_total_timesteps),
+                        model_tag_param=train_model_tag
+                    )
+                    if saved_model_path:
+                        st.success(f"Training finished! Model saved to: {saved_model_path}")
+                        st.cache_data.clear() # Clear cache for list_streamlit_models
+                        st.info("Model list updated. You might need to reselect the model in the sidebar if it was previously selected, or refresh the page.")
+                    else:
+                        st.error("Training failed or algorithm not found. Check console logs.")
+                except Exception as e:
+                    st.error(f"An error occurred during training: {e}")
+                    st.exception(e)
+
+with tab_inference_backtesting: # Renamed from tab_inference
     st.header("Run Inference / Backtest")
 
     if not st.session_state.selected_model_info:
@@ -258,19 +441,43 @@ with tab_inference:
                         cols[col_idx].metric(label=key, value=str(value))
                         item_idx += 1
 
-            try:
-                import matplotlib.pyplot as plt
-                fig, ax = plt.subplots(figsize=(12,6))
-                ax.plot(portfolio_df_series.index, portfolio_df_series.values)
-                ax.set_title("Portfolio Value Over Time")
-                ax.set_xlabel("Time Steps")
-                ax.set_ylabel("Portfolio Value ($)")
-                ax.grid(True)
-                st.pyplot(fig)
-            except ImportError:
-                st.warning("Matplotlib not found. Cannot display plot.")
-            except Exception as e:
-                st.error(f"Error displaying plot: {e}")
+            st.subheader("Performance Plots")
+
+            # Portfolio Value Over Time
+            x_axis_data = portfolio_df_series.index # Default to time steps
+            if st.session_state.processed_data_df is not None and \
+               len(st.session_state.processed_data_df.index) == len(portfolio_df_series):
+                x_axis_data = st.session_state.processed_data_df.index
+                x_axis_title = "Date"
+            else:
+                x_axis_title = "Time Steps"
+
+            fig_pv = go.Figure()
+            fig_pv.add_trace(go.Scatter(x=x_axis_data, y=portfolio_df_series.values,
+                                    mode='lines', name='Portfolio Value'))
+            fig_pv.update_layout(
+                title_text="Portfolio Value Over Time",
+                xaxis_title=x_axis_title,
+                yaxis_title="Portfolio Value ($)",
+                height=500
+            )
+            st.plotly_chart(fig_pv, use_container_width=True)
+
+            # Distribution of Daily Returns
+            if daily_returns: # Check if daily_returns is not empty
+                fig_returns_dist = px.histogram(
+                    x=daily_returns,
+                    nbins=50,
+                    title="Distribution of Daily Returns"
+                )
+                fig_returns_dist.update_layout(
+                    xaxis_title="Daily Return",
+                    yaxis_title="Frequency",
+                    height=400
+                )
+                st.plotly_chart(fig_returns_dist, use_container_width=True)
+            else:
+                st.warning("No daily returns data to display histogram.")
 
 with tab_model_info:
     st.header("Model and Environment Information")
