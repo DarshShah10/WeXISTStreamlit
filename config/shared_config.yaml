@@ -1,0 +1,180 @@
+# config/shared_config.yaml
+
+# --- General Settings ---
+project_name: "RLTradingFramework"
+python_version: "3.10" # Or your target version
+
+# --- File Paths ---
+# Base directories (can be relative to project root or absolute)
+# Using relative paths for better portability
+data_dir: "data"
+model_dir: "models"
+log_dir: "logs"
+config_dir: "config" # For this file itself and potentially others
+fundamental_analysis_dir: "Fundamental"
+
+# Specific file/subdir names or patterns
+# Data preprocessing pipeline paths
+raw_stock_data_dir: "raw_stock_data" # Subdirectory under data_dir for raw ticker CSVs
+processed_stock_data_dir: "processed_stock_data" # Subdirectory for per-ticker processed data
+feature_engineered_data_dir: "feature_engineered_data" # Subdirectory for per-ticker feature data
+final_combined_data_dir: "final_combined_data" # Subdirectory for merged data for env
+macro_data_filename: "macro_economic_data.csv" # Under data_dir
+processed_macro_filename: "processed_macro_economic_data.csv" # Under data_dir
+
+# Model related paths
+xgboost_model_filename: "xgboost_fundamental_model.bin" # Under model_dir or fundamental_analysis_dir
+tensorboard_log_dir: "tensorboard_logs" # Under log_dir
+checkpoint_dir: "checkpoints" # Under model_dir
+best_model_dir: "best_model" # Under model_dir
+vecnormalize_suffix: "_vecnormalize.pkl"
+model_zip_suffix: ".zip"
+
+# Output paths
+backtest_output_dir: "backtest_results" # Under log_dir or a dedicated output_dir
+trading_metrics_filename: "trading_environment_metrics.csv" # e.g., under log_dir
+
+# --- Data Parameters ---
+# Default tickers for training and processing
+default_ticker_list:
+  - "RELIANCE.NS"
+  - "TCS.NS"
+  - "INFY.NS"
+  - "HDFCBANK.NS"
+  - "ICICIBANK.NS"
+
+# Date ranges (ISO format: YYYY-MM-DD)
+default_start_date: "2019-01-01"
+default_end_date: "2022-01-01" # End of training/start of validation
+default_test_end_date: "2023-01-01" # End of test/evaluation period
+
+# Technical indicators to be used
+tech_indicator_list:
+  - "sma50"
+  - "sma200"
+  - "ema12"
+  - "ema26"
+  - "macd" # MACD signal and histogram are often derived from this
+  - "rsi"
+  - "cci"
+  - "adx"
+  - "obv"
+  # Bollinger Bands typically include upper, middle, lower
+  - "bb_upper"
+  - "bb_middle"
+  - "bb_lower"
+  # Stochastic Oscillator parts
+  # - "sok" # %K - often just 'stoch_k' or similar in libraries
+  # - "sod" # %D - often just 'stoch_d' or similar
+  # Some libraries might have different names or combined indicators
+  # Example: using 'STOCHk' and 'STOCHd' if a library like pandas_ta is used
+  - "stoch_k"
+  - "stoch_d"
+  # Ichimoku Cloud components (example, can be extensive)
+  # - "ichimoku_a"
+  # - "ichimoku_b"
+  # - "ichimoku_base"
+  # - "ichimoku_conversion"
+  # - "ichimoku_lead_a" # Future plot
+  # - "ichimoku_lead_b" # Future plot
+  # Volume MA - placeholder if 'vm' was custom, or use standard lib version
+  - "volume_sma_20" # Example: 20-day moving average of volume
+
+# Macroeconomic features expected
+macro_feature_list:
+  - "snp500" # Example, adjust to actual data source
+  - "gold_price"
+  - "interest_rate"
+  # - "vix" # Example: Volatility Index
+
+# --- Trading Environment Parameters (MultiStockTradingEnv) ---
+initial_amount: 100000.0
+# Buy/Sell costs can be a single value applied to all, or per-stock if needed
+# For simplicity, a single value is often fine, or a list matching num_stocks
+buy_cost_pct: 0.001 # Applied per stock
+sell_cost_pct: 0.001 # Applied per stock
+hmax_per_stock: 1000 # Max shares to trade per transaction, per stock
+reward_scaling: 0.0001 # Scales the raw reward from the environment
+lookback_window: 30 # Days for observation window / some TA calculations
+max_steps_per_episode: 2000 # Max steps in an episode, can be data length
+stop_loss_threshold: 0.15 # e.g., 15%
+risk_penalty: 0.0005 # General risk penalty in reward function (example)
+
+# Reward function parameters (can be nested for clarity)
+# These are example parameters from the current trading_env.py, may need tuning
+reward_params:
+  k_p: 2.0
+  k_l: 0.5
+  gamma: 4.0
+  alpha: 1.5
+  beta: 1.5
+  lambda: 0.5 # Note: 'lambda' is a Python keyword, be careful if using as dict key directly without quotes
+  lookback_window: 30 # Can be same as env lookback or specific for reward calc
+  w_risk: 0.1
+  w_drawdown: 0.1
+  w_action: 0.05
+  phi: [0.05, 0.05, 0.05, 0.05]
+  epsilon: 0.05
+  weight_min: 0.05
+  k_a: 0.05
+  eta: 0.3
+  r_threshold: 0.05
+  reward_scaling_factor: 100.0
+  k_d: 0.2
+  delta: 1.2
+  rho: 0.1
+  k_r: 0.1
+  debug: false
+
+# --- Model Training Parameters (SB3 Agents) ---
+# Common SB3 params
+default_policy: "MlpPolicy" # e.g., "MlpPolicy", "CnnPolicy", "MultiInputPolicy"
+default_total_timesteps: 50000
+default_n_eval_episodes: 5
+default_eval_freq: 10000 # Steps
+
+# PPO specific
+ppo:
+  n_steps: 1024
+  batch_size: 64
+  learning_rate: 0.0003
+  ent_coef: 0.0
+  gae_lambda: 0.95
+  # policy_kwargs: "dict(net_arch=[dict(pi=[128, 128], vf=[128, 128])])" # Example: needs careful parsing if string
+
+# TD3 specific
+td3:
+  learning_rate: 0.0003
+  batch_size: 128
+  buffer_size: 1000000
+  gamma: 0.99
+  tau: 0.005
+  policy_delay: 2
+  action_noise: # Parameters for NormalActionNoise or OrnsteinUhlenbeckActionNoise
+    type: "NormalActionNoise" # or "OrnsteinUhlenbeckActionNoise"
+    mean: 0.0 # Single value or list per action dim
+    sigma: 0.1 # Single value or list per action dim
+  # policy_kwargs: "dict(net_arch=[400, 300])"
+
+# RecurrentPPO specific (if used from sb3_contrib)
+recurrent_ppo:
+  policy: "LstmPolicy" # Or MlpLstmPolicy
+  n_steps: 2048
+  batch_size: 128
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  max_grad_norm: 0.5
+  # policy_kwargs: "dict(net_arch=[dict(pi=[128], vf=[128])], lstm_hidden_size=128)" # Example
+
+# Add other algorithms (A2C, DDPG) as needed
+
+# --- Streamlit App Configuration ---
+streamlit_app_title: "RL Trading Dashboard"
+# Any other app-specific settings
+
+# --- Fundamental Analysis ---
+nifty_url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv" # URL for NIFTY 500 list
+fundamental_num_stocks_to_select: 20 # Number of stocks to select based on fundamental model
+fundamental_num_stocks_to_process: 200 # Number of nifty stocks to get data for to train fundamental model

@@ -5,12 +5,14 @@ matplotlib
 seaborn
 scikit-learn
 ta  # Technical Analysis Library
+pandas-ta # Another Technical Analysis Library
 
 # Machine Learning
 xgboost
 
 # Data & Finance
 yfinance
+pandas_datareader
 
 # Visualization
 plotly
@@ -26,3 +28,6 @@ git+https://github.com/DLR-RM/stable-baselines3.git  # Latest stable-baselines3 
 
 # Logging
 logging  # Python's built-in logging, no need to install separately
+
+# YAML Parsing
+PyYAML

@@ -6,33 +6,85 @@ import matplotlib.dates as mdates
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from src.envs.trading_env import MultiStockTradingEnv
+from src.utils import load_config # Import config loader
+import datetime # For timestamped output directories
 
 class RecurrentPPOBacktester:
-    def __init__(self, model_path, env_path, output_dir):
+    def __init__(self, model_path, env_path, output_dir=None, config=None, ticker_list=None):
         self.model_path = model_path
-        self.env_path = env_path
-        self.output_dir = output_dir
+        self.env_path = env_path # Path to VecNormalize stats
+
+        if config is None:
+            self.config = load_config()
+        else:
+            self.config = config
+
+        self.ticker_list = ticker_list if ticker_list is not None else self.config.get('default_ticker_list', [])
+        if not self.ticker_list:
+            raise ValueError("Ticker list must be provided either as an argument or in the config file.")
+
+        if output_dir is None:
+            project_root = self.config.get('PROJECT_ROOT', '.')
+            log_dir = self.config.get('log_dir', 'logs')
+            backtest_base_dir = self.config.get('backtest_output_dir', 'backtest_results')
+
+            model_name = os.path.splitext(os.path.basename(self.model_path))[0]
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            # Create a unique directory for this backtest run
+            self.output_dir = os.path.join(project_root, log_dir, backtest_base_dir, f"recurrent_ppo_{model_name}_{timestamp}")
+        else:
+            self.output_dir = output_dir
+
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run_backtest(self, backtest_csv_path):
         df_backtest = pd.read_csv(backtest_csv_path)
-        df_backtest["date"] = pd.to_datetime(df_backtest["Date"])
-        df_backtest.set_index("date", inplace=True)
+        if "Date" not in df_backtest.columns:
+            raise ValueError("Backtest CSV data must contain a 'Date' column.")
+        df_backtest["date_col"] = pd.to_datetime(df_backtest["Date"])
+        df_backtest.set_index("date_col", inplace=True)
+
+        num_stocks_env = len(self.ticker_list)
+
+        # Environment parameters from config, with fallbacks
+        initial_amount = self.config.get('initial_amount', 100000.0)
+
+        buy_cost_conf = self.config.get('buy_cost_pct', 0.001)
+        buy_cost_pct_list = [buy_cost_conf] * num_stocks_env if isinstance(buy_cost_conf, float) else buy_cost_conf
+        if len(buy_cost_pct_list) != num_stocks_env:
+             buy_cost_pct_list = [buy_cost_pct_list[0] if buy_cost_pct_list else 0.001] * num_stocks_env
+
+        sell_cost_conf = self.config.get('sell_cost_pct', 0.001)
+        sell_cost_pct_list = [sell_cost_conf] * num_stocks_env if isinstance(sell_cost_conf, float) else sell_cost_conf
+        if len(sell_cost_pct_list) != num_stocks_env:
+            sell_cost_pct_list = [sell_cost_pct_list[0] if sell_cost_pct_list else 0.001] * num_stocks_env
+
+        hmax_conf = self.config.get('hmax_per_stock', 1000)
+        hmax_per_stock_list = [hmax_conf] * num_stocks_env if isinstance(hmax_conf, (int, float)) else hmax_conf
+        if len(hmax_per_stock_list) != num_stocks_env:
+            hmax_per_stock_list = [hmax_per_stock_list[0] if hmax_per_stock_list else 1000] * num_stocks_env
+
+        tech_indicators = self.config.get('tech_indicator_list', [])
+        lookback = self.config.get('lookback_window', 30)
+        reward_scale = self.config.get('reward_scaling', 1e-4) # General env reward scaling
+        env_seed = self.config.get('random_seed', None)
+
+        env_metrics_path = os.path.join(self.output_dir, 'recurrent_ppo_env_metrics.csv')
 
         backtest_env = MultiStockTradingEnv(
             df=df_backtest,
-            num_stocks=5,
-            initial_amount=100000.00,
-            buy_cost_pct=[0.001] * 5,
-            sell_cost_pct=[0.001] * 5,
-            hmax_per_stock=[1000] * 5,
-            reward_scaling=1e-4,
-            tech_indicator_list=[
-                "sma50", "sma200", "ema12", "ema26", "macd", "rsi", "cci", "adx",
-                "sok", "sod", "du", "dl", "vm", "bb_upper", "bb_lower", "bb_middle", "obv"
-            ],
-            lookback_window=30,
-            training=False,
+            num_stocks=num_stocks_env,
+            config=self.config, # Pass the full config
+            initial_amount=initial_amount,
+            buy_cost_pct=buy_cost_pct_list,
+            sell_cost_pct=sell_cost_pct_list,
+            hmax_per_stock=hmax_per_stock_list,
+            reward_scaling=reward_scale, # This is MultiStockTradingEnv's internal scaling
+            tech_indicator_list=tech_indicators,
+            lookback_window=lookback,
+            training=False, # Explicitly set to False
+            metrics_save_path=env_metrics_path,
+            seed=env_seed
         )
 
         model = RecurrentPPO.load(self.model_path)
