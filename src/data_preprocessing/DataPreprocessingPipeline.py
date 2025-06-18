@@ -1,10 +1,11 @@
-from DataPreprocessing.CollectData import StockDataCollector
-from DataPreprocessing.PreProcess import StockDataPreprocessor
-from DataPreprocessing.FeatureEngineer import StockFeatureEngineer
-from DataPreprocessing.Post_Process_Features import StockDataPostProcessor
-from DataPreprocessing.Download_Macro import MacroDataDownloader
-from DataPreprocessing.PreProcessMacro import MacroDataProcessor
-from DataPreprocessing.CombineDf import DataMerger
+import os
+from src.data_preprocessing.CollectData import StockDataCollector
+from src.data_preprocessing.PreProcess import StockDataPreprocessor
+from src.data_preprocessing.FeatureEngineer import StockFeatureEngineer
+from src.data_preprocessing.Post_Process_Features import StockDataPostProcessor
+from src.data_preprocessing.Download_Macro import MacroDataDownloader
+from src.data_preprocessing.PreProcessMacro import MacroDataProcessor
+from src.data_preprocessing.CombineDf import DataMerger
 
 
 
@@ -16,9 +17,9 @@ class StockPreProcessPipeline:
         self.post_processed_data_dir = 'post_processed_data'
         self.macro_data_file = 'macro_data.csv'
         self.processed_macro_file = 'macro.csv'
-        self.combined_data_file = 'combined_stock_data.csv'
+        # self.combined_data_file = "data/combined_stock_data.csv" # Now passed to run_data_pipeline
 
-    def run_data_pipeline(self, ticker_list, start_date, end_date):
+    def run_data_pipeline(self, ticker_list, start_date, end_date, output_csv_path):
         # Step 1: Collect stock data
         collector = StockDataCollector(save_dir=self.stock_data_dir)
         collector.run_collect(ticker_list, start_date, end_date)
@@ -50,12 +51,13 @@ class StockPreProcessPipeline:
         processor.run_macro_postProcess()
 
         # Step 7: Merge datasets
+        os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)  # Ensure data directory exists
         merger = DataMerger(
             self.post_processed_data_dir,
             self.processed_macro_file,
-            self.combined_data_file
+            output_csv_path
         )
         combined_file = merger.run_combine_data()
         
-        return combined_file
+        return output_csv_path # Return the path where the file was saved
 

@@ -6,7 +6,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import NormalActionNoise
-from Environment.New_Trading_Env import MultiStockTradingEnv
+from src.envs.trading_env import MultiStockTradingEnv
 
 
 class TD3TradingBot:
