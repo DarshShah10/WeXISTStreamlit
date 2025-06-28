@@ -211,9 +211,26 @@ st.sidebar.subheader("Data for Backtest/Inference")
 default_tickers_list = CONFIG.get('default_ticker_list', ["AAPL", "MSFT", "GOOG"])
 user_tickers_str = st.sidebar.text_input(
     "Enter Stock Tickers (comma-separated)",
-    value=", ".join(default_tickers_list[:3]) # Show first 3 by default
+    value=", ".join(default_tickers_list[:3]), # Show first 3 by default
+    key="sb_manual_tickers"
 )
-selected_tickers = [ticker.strip().upper() for ticker in user_tickers_str.split(",") if ticker.strip()]
+
+st.session_state.use_fundamental_tickers_sidebar = st.sidebar.checkbox(
+    "🧠 Use Fundamentally Selected Tickers",
+    value=False, # Default to false
+    key="sb_use_fundamental_tickers_toggle",
+    help="If checked, the app will try to fetch top tickers from the Fundamental Analysis module, overriding manual input."
+)
+
+selected_tickers = []
+if st.session_state.use_fundamental_tickers_sidebar:
+    # Placeholder for now, actual fetching will happen on button press to avoid running it on every sidebar interaction
+    # For display purposes in the sidebar, we might show a message or last fetched tickers
+    st.sidebar.info("Fundamental tickers will be fetched when an action (Train/Backtest) is triggered.")
+    # selected_tickers will be populated dynamically later
+else:
+    selected_tickers = [ticker.strip().upper() for ticker in user_tickers_str.split(",") if ticker.strip()]
+
 
 # Use default dates from CONFIG, convert to datetime
 # Fallback to relative dates if config values are missing/invalid
@@ -307,9 +324,20 @@ with tab_model_training:
     train_tickers_str = st.text_input(
         "Stock Tickers for Training",
         value=", ".join(train_default_tickers),
-        key="train_tickers"
+        key="train_tickers",
+        disabled=st.session_state.get("use_fundamental_tickers_sidebar", False) # Disable if global fundamental toggle is on
     )
-    train_selected_tickers = [ticker.strip().upper() for ticker in train_tickers_str.split(",") if ticker.strip()]
+
+    # Determine effective tickers for training
+    if st.session_state.get("use_fundamental_tickers_sidebar", False):
+        # If global toggle is on, training will also use fundamental tickers.
+        # The actual fetching logic will be inside the button press.
+        # For display here, we can show a message.
+        st.info("Using fundamentally selected tickers (from sidebar setting). Manual ticker input above is disabled.")
+        train_selected_tickers = [] # Will be populated by fundamental analysis
+    else:
+        train_selected_tickers = [ticker.strip().upper() for ticker in train_tickers_str.split(",") if ticker.strip()]
+
 
     # Default dates for training from config
     train_def_start_date = _parse_date_from_config(CONFIG.get('default_start_date'), 4*365)
@@ -334,23 +362,52 @@ with tab_model_training:
     train_model_tag = st.text_input("Model Name Tag (Optional)", key="train_model_tag", placeholder="e.g., my_ppo_run")
 
     if st.button("🚀 Start Training", key="btn_start_training"):
-        # Validations... (similar to before)
-        if not train_selected_tickers or not train_selected_algo or \
+        final_train_tickers = train_selected_tickers
+
+        if st.session_state.get("use_fundamental_tickers_sidebar", False):
+            with st.spinner("Fetching fundamentally selected tickers for training..."):
+                try:
+                    from Fundamental.test_fundamental import BacktestFundamental
+                    fundamental_backtester = BacktestFundamental(config=CONFIG)
+                    top_stocks_df = fundamental_backtester.run_backtest()
+                    if top_stocks_df is not None and not top_stocks_df.empty and "Ticker" in top_stocks_df.columns:
+                        fundamental_tickers = top_stocks_df["Ticker"].tolist()
+                        if fundamental_tickers:
+                            st.success(f"Using fundamental tickers for training: {fundamental_tickers}")
+                            final_train_tickers = fundamental_tickers
+                        else:
+                            st.error("Fundamental analysis returned no tickers. Training cannot proceed with this option.")
+                            st.stop()
+                    else:
+                        st.error("Fundamental analysis did not return valid top stocks. Training cannot proceed with this option.")
+                        st.stop()
+                except Exception as e:
+                    st.error(f"Error fetching fundamental tickers: {e}")
+                    st.exception(e)
+                    st.stop()
+
+        if not final_train_tickers:
+            st.warning("No tickers selected for training. Please provide tickers manually or enable fundamental selection.")
+        elif not train_selected_algo or \
            train_start_date >= train_end_date or train_end_date >= train_test_end_date:
-            st.warning("Please check inputs: tickers, algorithm, and date ranges.")
+            st.warning("Please check inputs: algorithm, and date ranges.")
         else:
-            st.info(f"Starting training for {train_selected_algo}...")
+            st.info(f"Starting training for {train_selected_algo} with tickers: {final_train_tickers}...")
             with st.spinner(f"Training {train_selected_algo} model... Check console for logs."):
                 try:
+                    # Pass the use_fundamental_tickers flag to run_training_programmatically
+                    # It will internally decide whether to use its own fundamental logic or the passed list.
+                    # For Streamlit, we explicitly fetch and pass the list if the sidebar toggle is on.
                     saved_model_path = run_training_programmatically(
-                        config=CONFIG, # Pass the global CONFIG
-                        selected_algo_name=train_selected_algo, # Note: param name changed in train.py
-                        ticker_list=train_selected_tickers,      # Note: param name changed
-                        start_date=train_start_date.strftime('%Y-%m-%d'), # Note: param name changed
-                        end_date=train_end_date.strftime('%Y-%m-%d'),     # Note: param name changed
-                        test_end_date=train_test_end_date.strftime('%Y-%m-%d'), # Note: param name changed
-                        total_timesteps=int(train_total_timesteps), # Note: param name changed
-                        model_tag=train_model_tag # Note: param name changed
+                        config=CONFIG,
+                        selected_algo_name=train_selected_algo,
+                        ticker_list=final_train_tickers, # This list is now potentially from fundamental analysis
+                        start_date=train_start_date.strftime('%Y-%m-%d'),
+                        end_date=train_end_date.strftime('%Y-%m-%d'),
+                        test_end_date=train_test_end_date.strftime('%Y-%m-%d'),
+                        total_timesteps=int(train_total_timesteps),
+                        model_tag=train_model_tag,
+                        use_fundamental_tickers=False # Set to False because Streamlit handles the ticker fetching explicitly if toggle is on
                     )
                     if saved_model_path:
                         st.success(f"Training finished! Model saved to: {saved_model_path}")
@@ -366,34 +423,72 @@ with tab_model_training:
 with tab_inference_backtesting:
     st.header("Run Inference / Backtest")
 
+    # Determine effective tickers for backtesting based on sidebar selection
+    # The 'selected_tickers' variable is already populated based on the sidebar toggle.
+    # We need to fetch them if fundamental is selected, inside the button action.
+
     if not st.session_state.selected_model_info:
         st.warning("Please select a model from the sidebar.")
-    elif not selected_tickers: # selected_tickers is from sidebar
-        st.warning("Please enter at least one stock ticker in the sidebar.")
+    # elif not selected_tickers and not st.session_state.get("use_fundamental_tickers_sidebar", False):
+    #     # This condition is tricky because selected_tickers is empty if fundamental is chosen.
+    #     # We'll validate final_backtest_tickers inside the button logic.
+    #     st.warning("Please enter at least one stock ticker in the sidebar or select to use fundamental tickers.")
     elif start_date >= end_date: # start_date and end_date from sidebar
         st.error("Error: Start date must be before end date.")
     else:
         st.write(f"**Selected Model**: {st.session_state.selected_model_info['name']}")
-        st.write(f"**Tickers**: {', '.join(selected_tickers)}")
+        # Display tickers based on selection type
+        if st.session_state.get("use_fundamental_tickers_sidebar", False):
+            st.write(f"**Tickers**: Fundamentally selected (will be fetched on run)")
+        else:
+            st.write(f"**Tickers**: {', '.join(selected_tickers) if selected_tickers else 'None manually entered'}")
         st.write(f"**Date Range**: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
         if st.button("🚀 Process Data & Run Backtest", key="btn_run_backtest"):
+            final_backtest_tickers = selected_tickers # Start with manually entered or empty if fundamental
+
+            if st.session_state.get("use_fundamental_tickers_sidebar", False):
+                with st.spinner("Fetching fundamentally selected tickers for backtest..."):
+                    try:
+                        from Fundamental.test_fundamental import BacktestFundamental
+                        fundamental_backtester = BacktestFundamental(config=CONFIG)
+                        top_stocks_df = fundamental_backtester.run_backtest()
+                        if top_stocks_df is not None and not top_stocks_df.empty and "Ticker" in top_stocks_df.columns:
+                            fundamental_tickers = top_stocks_df["Ticker"].tolist()
+                            if fundamental_tickers:
+                                st.success(f"Using fundamental tickers for backtest: {fundamental_tickers}")
+                                final_backtest_tickers = fundamental_tickers
+                            else:
+                                st.error("Fundamental analysis returned no tickers. Backtest cannot proceed with this option.")
+                                st.stop()
+                        else:
+                            st.error("Fundamental analysis did not return valid top stocks. Backtest cannot proceed.")
+                            st.stop()
+                    except Exception as e:
+                        st.error(f"Error fetching fundamental tickers: {e}")
+                        st.exception(e)
+                        st.stop()
+
+            if not final_backtest_tickers:
+                st.error("No tickers available for backtest. Please select tickers manually or ensure fundamental analysis provides them.")
+                st.stop()
+
             st.session_state.processed_data_df_for_backtest = None
             st.session_state.backtest_metrics_dict = None
             st.session_state.backtest_results_df = None
-            backtester_output_dir_for_run = None # To store and display path to backtester's unique output dir
+            backtester_output_dir_for_run = None
 
             processed_data_csv_path = None
-            with st.spinner("Processing data for backtesting..."):
+            with st.spinner(f"Processing data for backtesting on: {', '.join(final_backtest_tickers)}..."):
                 try:
                     os.makedirs(APP_TEMP_DATA_DIR, exist_ok=True)
-                    sorted_selected_tickers_str = "_".join(sorted(selected_tickers))
+                    sorted_selected_tickers_str = "_".join(sorted(final_backtest_tickers))
                     output_filename = f"backtest_app_data_{sorted_selected_tickers_str}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
                     processed_data_csv_path = os.path.join(APP_TEMP_DATA_DIR, output_filename)
 
                     pipeline = StockPreProcessPipeline(config=st.session_state.config)
                     processed_data_csv_path = pipeline.run_data_pipeline(
-                        selected_tickers,
+                        final_backtest_tickers, # Use the determined list
                         start_date.strftime('%Y-%m-%d'),
                         end_date.strftime('%Y-%m-%d'),
                         processed_data_csv_path
@@ -510,52 +605,6 @@ with tab_inference_backtesting:
             st.plotly_chart(fig_returns_dist, use_container_width=True)
         else:
             st.warning("Daily returns data not found or empty for plotting distribution.")
-
-with tab_model_info:
-    st.header("Model and Environment Information")
-    if st.session_state.selected_model_info:
-            max_cols = 4
-            num_rows = (num_metrics + max_cols - 1) // max_cols
-            metric_items = list(valid_metrics.items())
-            item_idx = 0
-            for _ in range(num_rows):
-                cols = st.columns(min(num_metrics - item_idx, max_cols))
-                for col_idx in range(len(cols)):
-                    if item_idx < num_metrics:
-                        key, value = metric_items[item_idx]
-                        # Format certain metrics like Sharpe, Calmar as float with 2-3 decimal places
-                        if isinstance(value, float):
-                            value_str = f"{value:.3f}"
-                        else:
-                            value_str = str(value)
-                        cols[col_idx].metric(label=key, value=value_str)
-                        item_idx += 1
-
-            st.subheader("Performance Plots")
-            # ... (plotting logic remains similar) ...
-            x_axis_data = portfolio_df_series.index
-            if st.session_state.processed_data_df is not None and \
-               len(st.session_state.processed_data_df.index) == len(portfolio_df_series): # Ensure alignment
-                # Try to use the Date index from the processed data if available and aligned
-                x_axis_data = st.session_state.processed_data_df.index
-                x_axis_title = "Date"
-            else: # Fallback to time steps if not aligned or data_df not available
-                x_axis_data = pd.RangeIndex(start=0, stop=len(portfolio_df_series))
-                x_axis_title = "Time Steps"
-
-            fig_pv = go.Figure()
-            fig_pv.add_trace(go.Scatter(x=x_axis_data, y=portfolio_df_series.values,
-                                    mode='lines', name='Portfolio Value'))
-            fig_pv.update_layout(title_text="Portfolio Value Over Time", xaxis_title=x_axis_title, yaxis_title="Portfolio Value ($)", height=500)
-            st.plotly_chart(fig_pv, use_container_width=True)
-
-            if daily_returns and len(daily_returns) > 0:
-                fig_returns_dist = px.histogram(x=daily_returns, nbins=50, title="Distribution of Daily Returns")
-                fig_returns_dist.update_layout(xaxis_title="Daily Return", yaxis_title="Frequency", height=400)
-                st.plotly_chart(fig_returns_dist, use_container_width=True)
-            else:
-                st.warning("No daily returns data to display histogram.")
-
 
 with tab_model_info:
     st.header("Model and Environment Information")

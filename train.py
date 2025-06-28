@@ -190,16 +190,50 @@ def run_training_programmatically(
     end_date: str,
     test_end_date: str,
     total_timesteps: int,
-    model_tag: str = ""
+    model_tag: str = "",
+    use_fundamental_tickers: bool = False # New parameter
 ):
-    print(f"Starting programmatic training for {selected_algo_name} with tickers: {ticker_list}")
+    effective_ticker_list = ticker_list
+
+    if use_fundamental_tickers:
+        print("\n--- Attempting to fetch tickers from Fundamental Analysis module ---")
+        try:
+            from Fundamental.test_fundamental import BacktestFundamental # Use test_fundamental to load pre-trained model
+
+            # Initialize BacktestFundamental - it will load model based on paths in config
+            # It also needs nifty_url from config.
+            # We pass the main 'config' object.
+            fundamental_backtester = BacktestFundamental(config=config)
+            top_stocks_df = fundamental_backtester.run_backtest()
+
+            if top_stocks_df is not None and not top_stocks_df.empty and "Ticker" in top_stocks_df.columns:
+                fundamental_selected_tickers = top_stocks_df["Ticker"].tolist()
+                if fundamental_selected_tickers:
+                    print(f"Using tickers from Fundamental Analysis: {fundamental_selected_tickers}")
+                    effective_ticker_list = fundamental_selected_tickers
+                else:
+                    print("Fundamental Analysis returned no tickers. Falling back to provided/default ticker list.")
+            else:
+                print("Fundamental Analysis did not return valid top stocks. Falling back to provided/default ticker list.")
+        except ImportError:
+            print("Error: Could not import BacktestFundamental. Make sure Fundamental module is accessible.")
+            print("Falling back to provided/default ticker list.")
+        except Exception as e:
+            print(f"An error occurred while fetching tickers from Fundamental Analysis: {e}")
+            print("Falling back to provided/default ticker list.")
+
+    if not effective_ticker_list:
+        logging.error("No tickers available for training (neither provided nor from fundamental analysis). Aborting.")
+        return None
+
+    print(f"Starting programmatic training for {selected_algo_name} with tickers: {effective_ticker_list}")
     print(f"Data range: {start_date} to {end_date}, Test end date: {test_end_date}")
     print(f"Total timesteps: {total_timesteps}, Model tag: '{model_tag}'")
 
     # --- 1. Data Preparation ---
     # Pass config to prepare_data
     train_df, eval_df, actual_num_stocks = prepare_data(
-        config, ticker_list, start_date, end_date, test_end_date
+        config, effective_ticker_list, start_date, end_date, test_end_date
     )
     # actual_num_stocks is now determined by prepare_data based on actual data
     # This is crucial for env and model setup.
@@ -273,17 +307,18 @@ def run_training_programmatically(
         "verbose": model_specific_params.get('verbose', 1), # Use verbose from algo_config or default
         "tensorboard_log": tensorboard_log_dir, # Shared TB log dir
         "learning_rate": model_specific_params.get('learning_rate', config.get('ppo',{}).get('learning_rate', 3e-4)), # Example of deeper default
-        "policy_kwargs": model_specific_params.get('policy_kwargs', None)
+        "policy_kwargs": model_specific_params.get('policy_kwargs', None) # Already a dict or None
     }
 
-    if isinstance(shared_model_kwargs['policy_kwargs'], str):
-        try:
-            import ast
-            shared_model_kwargs['policy_kwargs'] = ast.literal_eval(shared_model_kwargs['policy_kwargs'])
-            logging.info(f"Successfully parsed policy_kwargs: {shared_model_kwargs['policy_kwargs']}")
-        except (ValueError, SyntaxError) as e:
-            logging.warning(f"Could not parse policy_kwargs string: {shared_model_kwargs['policy_kwargs']}. Error: {e}. Using None.")
-            shared_model_kwargs['policy_kwargs'] = None
+    # The ast.literal_eval block for policy_kwargs is removed as PyYAML handles parsing.
+    # Ensure that if policy_kwargs is None or not a dict, SB3 handles it gracefully (it usually does).
+    if shared_model_kwargs['policy_kwargs'] is not None and not isinstance(shared_model_kwargs['policy_kwargs'], dict):
+        logging.warning(f"policy_kwargs was expected to be a dictionary, but got {type(shared_model_kwargs['policy_kwargs'])}. Value: {shared_model_kwargs['policy_kwargs']}. Setting to None.")
+        shared_model_kwargs['policy_kwargs'] = None
+    elif shared_model_kwargs['policy_kwargs'] is None:
+        # If policy_kwargs is explicitly set to null or not present for an algo in YAML, it will be None here.
+        # SB3 models handle None policy_kwargs by using defaults.
+        logging.info(f"No policy_kwargs provided for {selected_algo_name} or explicitly set to null. Model will use default policy architecture.")
 
 
     if selected_algo_name == "TD3":

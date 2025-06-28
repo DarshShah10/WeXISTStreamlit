@@ -57,15 +57,28 @@ def handle_train_model(args):
     """Handles the model training sub-command."""
     print("Model training subcommand initiated.")
     try:
-        from train import run_training_programmatically
+        from train import run_training_programmatically # Assuming CONFIG is loaded within train.py
+        from src.utils import load_config # To load config here for use_fundamental_tickers logic if needed by train.py
 
-        tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',') if ticker.strip()]
-        if not tickers_list:
-            print("Error: No tickers provided for training.")
+        config = load_config() # Load config for train.py
+
+        tickers_list = []
+        if args.tickers:
+            tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',') if ticker.strip()]
+
+        if args.use_fundamental_tickers:
+            print("Flag --use_fundamental_tickers is set. Ticker list will be determined by the fundamental analysis module.")
+            # The tickers_list can be empty here; run_training_programmatically will handle it.
+            if tickers_list:
+                print(f"Warning: --tickers argument ({tickers_list}) provided but will be ignored due to --use_fundamental_tickers.")
+                tickers_list = [] # Ensure it's empty so fundamental tickers are definitely used
+        elif not tickers_list:
+            print("Error: No tickers provided and --use_fundamental_tickers is not set. Please provide --tickers or use --use_fundamental_tickers.")
             return
 
         print(f"Algorithm: {args.algo}")
-        print(f"Tickers: {tickers_list}")
+        if tickers_list: # Only print if tickers were manually provided and not overridden
+            print(f"Tickers (manual): {tickers_list}")
         print(f"Training Start Date: {args.start_date}")
         print(f"Training End Date: {args.end_date}")
         print(f"Test End Date: {args.test_end_date}")
@@ -74,13 +87,15 @@ def handle_train_model(args):
             print(f"Model Tag: {args.tag}")
 
         saved_model_path = run_training_programmatically(
-            selected_algo_name_param=args.algo,
-            ticker_list_param=tickers_list,
-            start_date_param=args.start_date,
-            end_date_param=args.end_date,
-            test_end_date_param=args.test_end_date,
-            total_timesteps_param=args.timesteps,
-            model_tag_param=args.tag if args.tag else ""
+            config=config, # Pass the loaded config object
+            selected_algo_name=args.algo, # Parameter name in train.py might be selected_algo_name
+            ticker_list=tickers_list, # Parameter name in train.py might be ticker_list
+            start_date=args.start_date, # Parameter name in train.py might be start_date
+            end_date=args.end_date, # Parameter name in train.py might be end_date
+            test_end_date=args.test_end_date, # Parameter name in train.py might be test_end_date
+            total_timesteps=args.timesteps, # Parameter name in train.py might be total_timesteps
+            model_tag=args.tag if args.tag else "", # Parameter name in train.py might be model_tag
+            use_fundamental_tickers=args.use_fundamental_tickers # Pass the new flag
         )
         if saved_model_path:
             print(f"Model training successful. Model saved to: {saved_model_path}")
@@ -92,43 +107,93 @@ def handle_train_model(args):
         print(f"An error occurred during model training: {e}")
 
 def handle_evaluate_model(args):
-    """Handles the model evaluation sub-command."""
+    """Handles the model evaluation sub-command using the BaseBacktester framework."""
     print("Model evaluation subcommand initiated.")
     try:
-        # Construct the command to call test.py
-        # Ensure test.py is executable and uses python from the environment
-        # sys.executable provides the path to the current Python interpreter
-        command = [
-            sys.executable,
-            "test.py",
-            "--model_path", args.model_path,
-            "--data_path", args.data_path,
-            "--tickers", args.tickers
-        ]
+        from src.utils import load_config
+        from src.envs.backtest import TD3Backtester
+        from src.envs.backtestppo import RecurrentPPOBacktester
+        # Add other backtesters as needed, e.g. PPOBacktester, A2CBacktester
 
-        print(f"Running evaluation command: {' '.join(command)}")
+        if not os.path.exists(args.model_path):
+            print(f"Error: Model file not found at {args.model_path}")
+            return
+        if not os.path.exists(args.data_path):
+            print(f"Error: Data file not found at {args.data_path}")
+            return
 
-        # We use subprocess.run and capture output.
-        # Check=True will raise CalledProcessError if test.py exits with non-zero status.
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        config = load_config() # Load shared configuration
+        tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',') if ticker.strip()]
+        if not tickers_list:
+            print("Error: No tickers provided for evaluation.")
+            return
 
-        print("\n--- Evaluation Output ---")
-        print(result.stdout)
-        if result.stderr:
-            print("\n--- Evaluation Errors (if any) ---")
-            print(result.stderr)
+        # Infer model type from model_path to select the correct backtester
+        # This is a heuristic. A more robust way might be to store model type with the model
+        # or have the user specify it.
+        model_filename_lower = os.path.basename(args.model_path).lower()
+        BacktesterClass = None
+        if "td3" in model_filename_lower:
+            BacktesterClass = TD3Backtester
+        elif "ppo" in model_filename_lower: # Catches both PPO and RecurrentPPO if names are consistent
+            # Differentiate between PPO and RecurrentPPO if necessary based on model or config structure
+            # For now, let's assume RecurrentPPO if "recurrent" or "lstm" is in the name, else standard PPO.
+            # This part might need refinement based on how models are named or if a generic PPOBacktester is created.
+            if "recurrent" in model_filename_lower or "lstm" in model_filename_lower:
+                 BacktesterClass = RecurrentPPOBacktester
+            else:
+                 # If you have a separate PPOBacktester for non-recurrent PPO:
+                 # from src.envs.backtest_ppo_standard import PPOBacktester # Example
+                 # BacktesterClass = PPOBacktester
+                 # For now, falling back to RecurrentPPOBacktester for any "ppo"
+                 print("Warning: Inferred PPO model. Using RecurrentPPOBacktester. Create a specific PPOBacktester if this is not a recurrent model.")
+                 BacktesterClass = RecurrentPPOBacktester # Or a future PPOBacktester
+        # Add elif for A2C, DDPG etc.
+        # elif "a2c" in model_filename_lower:
+        #     from src.envs.backtest_a2c import A2CBacktester # Assuming it exists
+        #     BacktesterClass = A2CBacktester
+        else:
+            print(f"Error: Could not determine backtester type from model name: {args.model_path}")
+            print("Please ensure model name contains 'td3', 'ppo', 'recurrentppo', etc.")
+            return
+
+        print(f"Using Backtester: {BacktesterClass.__name__}")
+
+        # Path for VecNormalize stats (if saved alongside the model)
+        env_stats_path = args.model_path.replace(config.get('model_zip_suffix', '.zip'), config.get('vecnormalize_suffix', '_vecnormalize.pkl'))
+        if not os.path.exists(env_stats_path):
+            print(f"Warning: VecNormalize stats file not found at {env_stats_path}. Proceeding without it.")
+            env_stats_path = None
+
+        backtester = BacktesterClass(
+            model_path=args.model_path,
+            env_stats_path=env_stats_path,
+            config=config,
+            ticker_list=tickers_list,
+            output_dir_suffix="cli_eval" # Add a suffix to distinguish CLI evaluations
+        )
+
+        print(f"Starting backtest for model: {args.model_path} with data: {args.data_path}")
+        metrics, results_df = backtester.run_full_backtest(backtest_data_source=args.data_path)
+
+        print("\n--- Evaluation Metrics ---")
+        for key, value in metrics.items():
+            print(f"{key}: {value}")
+
+        # The backtester already saves plots and detailed results to its output directory.
+        # We can print the path to that directory.
+        print(f"\nDetailed results, plots, and metrics saved in: {backtester.output_dir}")
         print("Model evaluation finished.")
 
-    except FileNotFoundError:
-        print("Error: test.py not found in the project root or python interpreter not found.")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred while running test.py: {e}")
-        print("\n--- test.py STDOUT ---")
-        print(e.stdout)
-        print("\n--- test.py STDERR ---")
-        print(e.stderr)
+    except ImportError as e:
+        print(f"Error importing necessary modules for evaluation: {e}")
+    except FileNotFoundError as e: # Should be caught by direct checks now
+        print(f"Error: A required file was not found: {e}")
     except Exception as e:
         print(f"An unexpected error occurred during model evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 def handle_launch_app(args):
     """Handles the Streamlit app launching sub-command."""
@@ -162,12 +227,13 @@ def main():
     # Sub-parser for Model Training
     parser_train = subparsers.add_parser("train", help="Train a new reinforcement learning model.")
     parser_train.add_argument("--algo", type=str, required=True, choices=["PPO", "A2C", "TD3", "DDPG", "RecurrentPPO"], help="Algorithm to use for training.")
-    parser_train.add_argument("--tickers", type=str, required=True, help="Comma-separated list of stock tickers for training.")
+    parser_train.add_argument("--tickers", type=str, help="Comma-separated list of stock tickers for training. Optional if --use_fundamental_tickers is set.")
     parser_train.add_argument("--start_date", type=str, required=True, help="Training start date (YYYY-MM-DD).")
     parser_train.add_argument("--end_date", type=str, required=True, help="Training end date (YYYY-MM-DD).")
     parser_train.add_argument("--test_end_date", type=str, required=True, help="Test data end date (YYYY-MM-DD) for evaluation split during training.")
     parser_train.add_argument("--timesteps", type=int, required=True, help="Total training timesteps.")
     parser_train.add_argument("--tag", type=str, help="Optional model name tag (e.g., 'my_custom_run').")
+    parser_train.add_argument("--use_fundamental_tickers", action="store_true", help="Use tickers from fundamental analysis instead of providing a list.")
     parser_train.set_defaults(func=handle_train_model)
 
     # Sub-parser for Model Evaluation
