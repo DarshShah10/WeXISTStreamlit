@@ -1,210 +1,139 @@
 import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import seaborn as sns
+import pandas as pd # Still needed for type hinting if run_backtest takes DataFrame
 from stable_baselines3 import TD3
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from src.envs.trading_env import MultiStockTradingEnv
-from src.utils import load_config # Import config loader
-import datetime # For timestamped output directories
+# Removed: numpy, matplotlib, seaborn, mdates, DummyVecEnv, VecNormalize, MultiStockTradingEnv, load_config, datetime
+# These are now handled by BaseBacktester or not needed here.
 
-class TD3Backtester:
-    def __init__(self, model_path, env_path, output_dir=None, config=None, ticker_list=None):
-        self.model_path = model_path
-        self.env_path = env_path # Path to VecNormalize stats
+from .base_backtester import BaseBacktester
 
-        if config is None:
-            self.config = load_config()
-        else:
-            self.config = config
-
-        self.ticker_list = ticker_list if ticker_list is not None else self.config.get('default_ticker_list', [])
-        if not self.ticker_list:
-            raise ValueError("Ticker list must be provided either as an argument or in the config file.")
-
-        if output_dir is None:
-            project_root = self.config.get('PROJECT_ROOT', '.')
-            log_dir = self.config.get('log_dir', 'logs')
-            backtest_base_dir = self.config.get('backtest_output_dir', 'backtest_results')
-
-            model_name = os.path.splitext(os.path.basename(self.model_path))[0]
-            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            # Create a unique directory for this backtest run
-            self.output_dir = os.path.join(project_root, log_dir, backtest_base_dir, f"td3_{model_name}_{timestamp}")
-        else:
-            self.output_dir = output_dir
-
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-    def calculate_metrics(self, df):
-        # Basic metrics
-        df['daily_returns'] = df['portfolio_value'].pct_change()
-        df['cumulative_return'] = (df['portfolio_value'] / df['portfolio_value'].iloc[0]) - 1
-        df['drawdown'] = (df['portfolio_value'].cummax() - df['portfolio_value']) / df['portfolio_value'].cummax()
-        
-        # Risk metrics
-        annual_return = df['daily_returns'].mean() * 252
-        annual_volatility = df['daily_returns'].std() * np.sqrt(252)
-        sharpe_ratio = annual_return / annual_volatility if annual_volatility != 0 else 0
-
-        # Sortino Ratio
-        downside_returns = df[df['daily_returns'] < 0]['daily_returns']
-        downside_volatility = downside_returns.std() * np.sqrt(252)  # Annualized downside deviation
-        sortino_ratio = annual_return / downside_volatility if downside_volatility != 0 else 0
-        
-        # Drawdown analysis
-        max_drawdown = df['drawdown'].max() * 100
-        avg_drawdown = df['drawdown'].mean() * 100
-        
-        # Trading metrics
-        winning_trades = len(df[df['daily_returns'] > 0])
-        losing_trades = len(df[df['daily_returns'] < 0])
-        win_rate = winning_trades / (winning_trades + losing_trades) if (winning_trades + losing_trades) > 0 else 0
-        
-        return {
-            'Annual Return': f"{annual_return*100:.2f}%",
-            'Annual Volatility': f"{annual_volatility*100:.2f}%",
-            'Sharpe Ratio': f"{sharpe_ratio:.2f}",
-            'Sortino Ratio': f"{sortino_ratio:.2f}",
-            'Max Drawdown': f"{max_drawdown:.2f}%",
-            'Average Drawdown': f"{avg_drawdown:.2f}%",
-            'Win Rate': f"{win_rate*100:.2f}%",
-            'Total Trades': winning_trades + losing_trades,
-            'Winning Trades': winning_trades,
-        }
-
-
-    def create_plots(self, df):
-        """Create various trading analysis plots"""
-        plots = {}
-        
-        # Portfolio Value Plot
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(df.index, df['portfolio_value'], color='blue', label='Portfolio Value')
-        ax.set_title('Portfolio Value Over Time')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Value ($)')
-        ax.grid(True)
-        plt.tight_layout()
-        plots['portfolio_value'] = fig
-
-        # Returns Distribution
-        fig, ax = plt.subplots(figsize=(12, 6))
-        sns.histplot(df['daily_returns'].dropna(), bins=50, ax=ax)
-        ax.set_title('Distribution of Daily Returns')
-        ax.set_xlabel('Daily Returns')
-        ax.set_ylabel('Frequency')
-        plt.tight_layout()
-        plots['returns_dist'] = fig
-
-        # Drawdown Plot
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.fill_between(df.index, df['drawdown'] * 100, 0, color='red', alpha=0.3)
-        ax.set_title('Portfolio Drawdown')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Drawdown (%)')
-        ax.grid(True)
-        plt.tight_layout()
-        plots['drawdown'] = fig
-
-        # Trading Activity
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.bar(df.index, df['trades'], color='green', alpha=0.6)
-        ax.set_title('Daily Trading Activity')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Number of Trades')
-        plt.tight_layout()
-        plots['trading_activity'] = fig
-
-        return plots
-
-    def run_backtest(self, backtest_csv_path):
-        # Load backtesting data
-        df_backtest = pd.read_csv(backtest_csv_path)
-        # Ensure 'Date' column exists and is used for datetime conversion
-        if "Date" not in df_backtest.columns:
-            raise ValueError("Backtest CSV data must contain a 'Date' column.")
-        df_backtest["date_col"] = pd.to_datetime(df_backtest["Date"]) # Use a temporary column name
-        df_backtest.set_index("date_col", inplace=True) # Set index using the new column
-
-        num_stocks_env = len(self.ticker_list)
-
-        # Environment parameters from config, with fallbacks
-        initial_amount = self.config.get('initial_amount', 100000.0)
-
-        buy_cost_conf = self.config.get('buy_cost_pct', 0.001)
-        buy_cost_pct_list = [buy_cost_conf] * num_stocks_env if isinstance(buy_cost_conf, float) else buy_cost_conf
-        if len(buy_cost_pct_list) != num_stocks_env: # Fallback if list size mismatch
-            buy_cost_pct_list = [buy_cost_pct_list[0] if buy_cost_pct_list else 0.001] * num_stocks_env
-
-        sell_cost_conf = self.config.get('sell_cost_pct', 0.001)
-        sell_cost_pct_list = [sell_cost_conf] * num_stocks_env if isinstance(sell_cost_conf, float) else sell_cost_conf
-        if len(sell_cost_pct_list) != num_stocks_env: # Fallback
-            sell_cost_pct_list = [sell_cost_pct_list[0] if sell_cost_pct_list else 0.001] * num_stocks_env
-
-        hmax_conf = self.config.get('hmax_per_stock', 1000)
-        hmax_per_stock_list = [hmax_conf] * num_stocks_env if isinstance(hmax_conf, (int, float)) else hmax_conf
-        if len(hmax_per_stock_list) != num_stocks_env: # Fallback
-            hmax_per_stock_list = [hmax_per_stock_list[0] if hmax_per_stock_list else 1000] * num_stocks_env
-
-        tech_indicators = self.config.get('tech_indicator_list', [])
-        lookback = self.config.get('lookback_window', 30)
-        reward_scale = self.config.get('reward_scaling', 1e-4)
-        env_seed = self.config.get('random_seed', None)
-
-        env_metrics_path = os.path.join(self.output_dir, 'td3_backtest_env_metrics.csv')
-
-        # Create and run backtest environment
-        backtest_env = MultiStockTradingEnv(
-            df=df_backtest,
-            num_stocks=num_stocks_env,
-            config=self.config, # Pass the full config
-            initial_amount=initial_amount,
-            buy_cost_pct=buy_cost_pct_list,
-            sell_cost_pct=sell_cost_pct_list,
-            hmax_per_stock=hmax_per_stock_list,
-            reward_scaling=reward_scale,
-            tech_indicator_list=tech_indicators,
-            lookback_window=lookback,
-            training=False, # Explicitly set to False for backtesting
-            metrics_save_path=env_metrics_path, # Pass path for env's own metrics
-            seed=env_seed
+class TD3Backtester(BaseBacktester):
+    def __init__(self, model_path: str, env_stats_path: str = None,
+                 output_dir_suffix: str = None, config: dict = None, ticker_list: list[str] = None):
+        super().__init__(
+            model_path=model_path,
+            env_stats_path=env_stats_path,
+            output_dir_suffix=output_dir_suffix,
+            config=config,
+            ticker_list=ticker_list
         )
 
-        # Load model and normalize environment if env_path (for VecNormalize stats) is provided
-        model = TD3.load(self.model_path)
-        venv = DummyVecEnv([lambda: backtest_env])
-        vec_normalize_backtest = VecNormalize.load(self.env_path, venv)
+    def _load_model(self, env_for_model):
+        """Loads the TD3 model."""
+        print(f"Loading TD3 model from: {self.model_path}")
+        # env_for_model is the (potentially normalized) VecEnv from BaseBacktester._create_environment
+        return TD3.load(self.model_path, env=env_for_model)
 
-        # Run simulation
-        obs = vec_normalize_backtest.reset()
-        done = False
-        episode_info = []
+    def _get_model_type_name(self) -> str:
+        return "TD3"
 
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, _, done, infos = vec_normalize_backtest.step(action)
-            episode_info.append(infos[0] if isinstance(infos, list) else infos)
+    def run_backtest(self, backtest_data_source: (str | pd.DataFrame)) -> tuple[dict, pd.DataFrame]:
+        """
+        Runs the full backtest using the BaseBacktester's orchestration.
 
-        # Process results
-        df = pd.DataFrame(episode_info)
-        df['current_date'] = pd.to_datetime(df['current_date'])
-        df.set_index('current_date', inplace=True)
+        :param backtest_data_source: Path to the backtest CSV data or a pandas DataFrame.
+        :return: Tuple containing (metrics_dict, results_dataframe).
+        """
+        return self.run_full_backtest(backtest_data_source=backtest_data_source)
+
+# Example usage (can be kept for testing this specific backtester)
+if __name__ == '__main__':
+    print("Running TD3Backtester example...")
+    # This requires a trained TD3 model, its VecNormalize stats (if used during training),
+    # a CSV file for backtesting data, and shared_config.yaml correctly set up.
+
+    # --- Configuration for the test ---
+    # 1. Ensure shared_config.yaml exists and is correctly configured.
+    #    Paths like PROJECT_ROOT, log_dir, backtest_output_dir should be valid.
+    #    default_ticker_list should be appropriate for the test data.
+
+    # 2. Prepare a dummy model file (e.g., copy a real small model or create an empty file)
+    #    For this test, we'll just use a placeholder path.
+    #    In a real scenario, this would be a path to a .zip model file.
+    _DUMMY_MODEL_DIR = "models_test/td3_test_models"
+    os.makedirs(_DUMMY_MODEL_DIR, exist_ok=True)
+    _DUMMY_MODEL_PATH = os.path.join(_DUMMY_MODEL_DIR, "dummy_td3_model.zip")
+    if not os.path.exists(_DUMMY_MODEL_PATH):
+        with open(_DUMMY_MODEL_PATH, "w") as f: # Create an empty file as placeholder
+            f.write("This is a dummy model file for TD3Backtester test.")
+
+    # 3. Prepare dummy VecNormalize stats file (optional, can be None)
+    #    If your model was trained with VecNormalize, you'd provide the .pkl file.
+    _DUMMY_ENV_STATS_PATH = None # Or path to a .pkl file
+
+    # 4. Prepare dummy backtest data CSV
+    _DUMMY_DATA_DIR = "data_test/td3_backtester_data"
+    os.makedirs(_DUMMY_DATA_DIR, exist_ok=True)
+    _DUMMY_BACKTEST_CSV = os.path.join(_DUMMY_DATA_DIR, "dummy_backtest_data.csv")
+
+    # Create a more comprehensive dummy CSV that MultiStockTradingEnv can process
+    # This needs to match the columns expected after DataMerger.py
+    # For simplicity, creating a very basic one. A real test would use output from DataPreprocessingPipeline.
+    num_test_days = 60 # Approx 2 months
+    test_start_date = pd.to_datetime("2023-01-01")
+    test_dates = pd.to_datetime([test_start_date + datetime.timedelta(days=i) for i in range(num_test_days)])
+
+    # Assuming 2 stocks for the default_ticker_list in config for testing
+    # And features expected by a minimal MultiStockTradingEnv (Date, close_0, close_1, etc.)
+    # This dummy data should ideally come from running the preprocessing pipeline on small data.
+    # For now, just enough to make the env load.
+    dummy_df_content = {'Date': test_dates}
+    # Add OHLCV, some fundamentals, some TAs for two stocks, and macro data
+    # This part is complex to make generic for a dummy test without running the pipeline.
+    # The BaseBacktester and env will validate columns based on config.
+    # For this example, we'll assume the CSV matches what the env expects.
+    # A simpler CSV for testing might only have Date and close_0, close_1 if env is adapted.
+    # However, the current env is strict.
+
+    # For this test to run without a fully preprocessed file, it's challenging.
+    # The current design requires the backtest_csv_path to be a file produced by DataMerger.
+    # Let's create a very minimal CSV.
+    # It's better to run the full pipeline once to generate a sample combined file for testing.
+    # For now, this __main__ block will be more of a conceptual guide.
+
+    # --- Simplified test ---
+    # This example primarily tests if the class structure works, not the full execution logic
+    # without proper input files.
+    try:
+        # Assuming shared_config.yaml defines default_ticker_list as e.g. ["MSFT", "GOOG"]
+        # and other necessary fields for MultiStockTradingEnv.
+
+        # Create a placeholder for backtest_data.csv
+        # In a real test, this CSV should be the output of your data pipeline.
+        placeholder_data = {"Date": ["2023-01-01", "2023-01-02"], "close_0": [100,101], "close_1": [200,201]} # Minimal
+        # Add other columns as expected by your _validate_data to avoid assertion errors.
+        # This is the tricky part for a lightweight dummy test.
+        # For now, this test will likely fail at _validate_data or _initialize_scalers
+        # if the dummy CSV doesn't have all columns defined by the config.
         
-        # Calculate metrics and create plots
-        metrics = self.calculate_metrics(df)
-        plots = self.create_plots(df)
+        # A truly runnable example here would require:
+        # 1. A valid shared_config.yaml
+        # 2. A sample `dummy_backtest_data.csv` that matches the structure defined by that config
+        #    (i.e., includes all price, fundamental, TA, and macro columns expected by _validate_data)
+        # 3. A placeholder model.zip and optionally vecnormalize.pkl
         
-        # Save results
-        df.to_csv(os.path.join(self.output_dir, "backtest_results.csv"))
-        for name, fig in plots.items():
-            fig.savefig(os.path.join(self.output_dir, f"{name}.png"))
-            plt.close(fig)
+        print("Conceptual example: To run this effectively, provide a valid model, env_stats (opt),")
+        print("and a backtest_data_source CSV that matches your environment's expected feature set.")
+        print(f"Dummy model path: {_DUMMY_MODEL_PATH}")
+        print(f"Dummy backtest data path: {_DUMMY_BACKTEST_CSV} (needs to be created with full features)")
 
-        return {
-            'metrics': metrics,
-            'df': df,
-            'plots_dir': self.output_dir
-        }
+        # Example instantiation (will likely fail if dummy_backtest_data.csv is not comprehensive)
+        # backtester = TD3Backtester(
+        #     model_path=_DUMMY_MODEL_PATH,
+        #     env_stats_path=_DUMMY_ENV_STATS_PATH,
+        #     # ticker_list can be omitted if default_ticker_list in config is sufficient
+        # )
+        # if os.path.exists(_DUMMY_BACKTEST_CSV): # Only run if data file exists
+        #     metrics, results = backtester.run_backtest(backtest_data_source=_DUMMY_BACKTEST_CSV)
+        #     print("
+Backtest Metrics:")
+        #     for k, v in metrics.items():
+        #         print(f"  {k}: {v}")
+        # else:
+        #     print(f"Skipping run_backtest as dummy data file '{_DUMMY_BACKTEST_CSV}' not found or not fully prepared.")
+
+    except Exception as e:
+        print(f"Error in TD3Backtester example: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("TD3Backtester example finished.")

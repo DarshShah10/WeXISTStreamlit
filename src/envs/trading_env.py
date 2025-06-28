@@ -86,85 +86,189 @@ class MultiStockTradingEnv(gym.Env):
             project_root = self.config.get('PROJECT_ROOT', os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
             self.actual_metrics_save_path = os.path.join(project_root, log_dir, metrics_filename)
 
-        self.df = self._preprocess_data(df.copy())
-        self.df_info = pd.DataFrame() # Initialize df_info for storing step metrics
-        # print(self.df.head()) # Reduced verbosity, can be enabled by debug flags
-        self._validate_data()
+        self.df = self._preprocess_data(df.copy()) # Ensure df is a copy
+        self.df_info = pd.DataFrame()
+
+        self._all_expected_columns = [] # Will be populated by _validate_data
+        self._price_columns_template = [] # Stems like 'open', 'close'
+        self._fundamental_columns_template = [] # Stems like 'eps', 'volatility_30d'
+        self._ta_columns_template = [] # Stems like 'sma_50', 'macd_12_26_9'
+        self._macro_columns_template = [] # Full names like 'snp500'
+
+        self._validate_data() # This will now populate the column templates and _all_expected_columns
         self._initialize_scalers()
-        self._setup_spaces()
+        self._setup_spaces() # This will use lengths of column templates
         self.reset()
 
-    def _preprocess_data(self, df):
-        for stock_id in range(self.num_stocks):
-            close_col = f'close_{stock_id}'
-            volume_col = f'volume_{stock_id}'
-            
-            # Add momentum and volume trends
-            df[f'momentum_{stock_id}'] = df[close_col].diff(10)
-            df[f'volume_trend_{stock_id}'] = df[volume_col].diff(5)
-            
-        # Fill NaN values
+    def _preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Minimal preprocessing on the already combined DataFrame.
+        Ensures data is filled as a final safeguard.
+        Momentum and volume trends are now expected from FeatureEngineer.
+        """
+        # Fill NaN values that might have occurred from merging different date ranges or at edges
         df.fillna(method='ffill', inplace=True)
         df.fillna(method='bfill', inplace=True)
         return df
 
+    def _get_expected_ta_column_stems(self, indicator_name_from_config: str) -> list[str]:
+        """
+        Helper to get the actual column name stems pandas-ta generates for a given config name.
+        These are lowercased as per DataMerger's processing.
+        Note: This mapping MUST align with FeatureEngineer.py's pandas_ta calls and DataMerger.py's lowercasing.
+        Default parameters are assumed for indicators like MACD, BBANDS, STOCH, ADX if not specified otherwise
+        in FeatureEngineer's call to pandas-ta.
+        """
+        name = indicator_name_from_config.lower().strip()
+        # Simple 1-to-1 mappings (where pandas-ta output name is just the indicator name + params)
+        if name == 'sma50': return ['sma_50']
+        if name == 'sma200': return ['sma_200']
+        if name == 'ema12': return ['ema_12']
+        if name == 'ema26': return ['ema_26']
+        if name == 'rsi': return ['rsi_14'] # Default length 14
+        if name == 'obv': return ['obv']
+        if name == 'cci': return ['cci_14_0.015'] # Default params for pandas-ta cci
+        if name == 'volume_sma_20': return ['volsma_20'] # Assuming FeatureEngineer creates 'VOLSMA_20' then it's lowercased by DataMerger
+
+        # Indicators that generate multiple columns
+        if name == 'macd': return ['macd_12_26_9', 'macdh_12_26_9', 'macds_12_26_9'] # Default params
+        if name == 'bbands': return ['bbl_5_2.0', 'bbm_5_2.0', 'bbu_5_2.0', 'bbb_5_2.0', 'bbp_5_2.0'] # Default params
+        if name == 'stoch': return ['stochk_14_3_3', 'stochd_14_3_3'] # Default params for STOCH
+        if name == 'adx': return ['adx_14', 'dmp_14', 'dmn_14'] # Default params for ADX
+
+        # For 'stoch_k' or 'stoch_d' if they were separate in config (they are part of 'stoch' output)
+        if name == 'stoch_k': return ['stochk_14_3_3']
+        if name == 'stoch_d': return ['stochd_14_3_3']
+        # For bbands components if listed separately in config
+        if name == 'bb_upper': return ['bbu_5_2.0']
+        if name == 'bb_middle': return ['bbm_5_2.0']
+        if name == 'bb_lower': return ['bbl_5_2.0']
+
+        # Fallback: if a name from config.tech_indicator_list isn't explicitly mapped above,
+        # assume it's a direct pandas-ta indicator name (already lowercased).
+        # This requires user to ensure config name matches pandas-ta's naming convention for simple indicators.
+        # E.g., if config has 'atr', pandas-ta might produce 'ATR_14' by default. This needs alignment.
+        # A more robust solution might involve inspecting pandas_ta's available indicators or having a stricter config format.
+        print(f"Warning: TA indicator '{name}' from config not explicitly mapped in _get_expected_ta_column_stems. Assuming direct name match (e.g., if config is 'atr', expects 'atr_14' or similar based on pandas-ta default).")
+        return [name]
+
+
     def _validate_data(self):
-        required_columns = ["snp500", "gold_price", "interest_rate"]
-        for stock in range(self.num_stocks):
-            required_columns.extend([
-                f"open_{stock}", f"high_{stock}", f"low_{stock}",
-                f"close_{stock}", f"volume_{stock}", 
-                f"eps_{stock}", f"pe_ratio_{stock}", f"volatility_30d_{stock}",
-                f"momentum_{stock}", f"volume_trend_{stock}"
-            ])
-            required_columns.extend([f"{tech}_{stock}" for tech in self.tech_indicator_list])
-        missing_columns = [col for col in required_columns if col not in self.df.columns]
-        assert not missing_columns, f"Missing required columns in dataframe: {missing_columns}"
+        """
+        Validates that all expected columns are present in the DataFrame.
+        Populates column templates for scalers and obs space (_price_columns_template, etc.).
+        Populates _all_expected_columns with the full list of columns names for assertion.
+        """
+        self._all_expected_columns = []
+
+        # 1. Price columns (OHLCV) - these are lowercased and suffixed by DataMerger
+        self._price_columns_template = ['open', 'high', 'low', 'close', 'volume']
+        for i in range(self.num_stocks):
+            self._all_expected_columns.extend([f"{col}_{i}" for col in self._price_columns_template])
+
+        # 2. Fundamental features (from FeatureEngineer, then lowercased + suffixed by DataMerger)
+        fund_params = self.config.get('fundamental_features', {})
+        vol_w = fund_params.get('volatility_window', 30)
+        mom_w = fund_params.get('momentum_window', 10)
+        vol_trend_w = fund_params.get('volume_trend_window', 5)
+
+        self._fundamental_columns_template = [
+            'eps', 'pe_ratio', # From yf.Ticker().info
+            f'volatility_{vol_w}d', # From FeatureEngineer
+            f'momentum_{mom_w}d',    # From FeatureEngineer
+            f'volume_trend_{vol_trend_w}d' # From FeatureEngineer
+        ]
+        for i in range(self.num_stocks):
+            self._all_expected_columns.extend([f"{col}_{i}" for col in self._fundamental_columns_template])
+
+        # 3. Technical indicators (from pandas-ta via FeatureEngineer, then lowercased + suffixed by DataMerger)
+        self._ta_columns_template = [] # This will store unique stems, e.g., 'sma_50', 'macd_12_26_9'
+        configured_tech_indicators = self.config.get('tech_indicator_list', [])
+
+        for ti_config_name in configured_tech_indicators:
+            stems = self._get_expected_ta_column_stems(ti_config_name)
+            self._ta_columns_template.extend(stems)
+
+        # Remove duplicates from _ta_columns_template if any indicator (like 'stoch' and 'stoch_k') generates overlapping stems
+        self._ta_columns_template = sorted(list(set(self._ta_columns_template)))
+
+        for i in range(self.num_stocks):
+            self._all_expected_columns.extend([f"{col}_{i}" for col in self._ta_columns_template])
+
+        # 4. Macro features (no suffix, direct from config's macro_feature_list)
+        self._macro_columns_template = self.config.get('macro_feature_list', [])
+        self._all_expected_columns.extend(self._macro_columns_template)
+
+        # Perform the check
+        missing_columns = [col for col in self._all_expected_columns if col not in self.df.columns]
+        if missing_columns:
+            print(f"DataFrame columns available: {sorted(self.df.columns.tolist())}")
+            print(f"Expected price col stems: {self._price_columns_template}")
+            print(f"Expected fund col stems: {self._fundamental_columns_template}")
+            print(f"Configured TAs: {configured_tech_indicators} -> Expected TA col stems: {self._ta_columns_template}")
+            print(f"Expected macro cols: {self._macro_columns_template}")
+            raise AssertionError(f"Missing required columns in combined DataFrame: {missing_columns}. "
+                                 "Check FeatureEngineer output, DataMerger suffixing, and TA indicator naming in config and _get_expected_ta_column_stems.")
         
     def _initialize_scalers(self):
         self.price_scaler = StandardScaler()
-        self.tech_scaler = StandardScaler()
+        self.per_stock_other_features_scaler = StandardScaler() # Scales fundamentals + TAs per stock
         self.macro_scaler = StandardScaler()
         
-        # Fit scalers
-        price_cols = []
-        tech_cols = []
-        for stock in range(self.num_stocks):
-            price_cols.extend([f'open_{stock}', f'high_{stock}', f'low_{stock}', f'close_{stock}', f'volume_{stock}'])
-            tech_cols.extend([
-                f'eps_{stock}', f'pe_ratio_{stock}', f'volatility_30d_{stock}',
-                f'momentum_{stock}', f'volume_trend_{stock}'
-            ])
-            tech_cols.extend([f'{tech}_{stock}' for tech in self.tech_indicator_list])
-        
-        self.price_scaler.fit(self.df[price_cols].values)
-        self.tech_scaler.fit(self.df[tech_cols].values)
-        self.macro_scaler.fit(self.df[['snp500', 'gold_price', 'interest_rate']].values)
+        # Collect all column names for fitting each scaler
+        price_cols_to_fit = [f"{col}_{i}" for i in range(self.num_stocks) for col in self._price_columns_template]
+
+        per_stock_other_features_to_fit = []
+        for i in range(self.num_stocks):
+            per_stock_other_features_to_fit.extend([f"{col}_{i}" for col in self._fundamental_columns_template])
+            per_stock_other_features_to_fit.extend([f"{col}_{i}" for col in self._ta_columns_template])
+
+        macro_cols_to_fit = self._macro_columns_template
+
+        # Fit scalers only if there are columns to fit
+        if price_cols_to_fit:
+             self.price_scaler.fit(self.df[price_cols_to_fit].values)
+        else:
+            print("Warning: No price columns found to fit price_scaler.")
+
+        if per_stock_other_features_to_fit:
+            self.per_stock_other_features_scaler.fit(self.df[per_stock_other_features_to_fit].values)
+        else:
+            print("Warning: No fundamental or TA columns found to fit per_stock_other_features_scaler.")
+
+        # Check if all macro columns are actually in the df before fitting
+        actual_macro_cols_in_df = [col for col in macro_cols_to_fit if col in self.df.columns]
+        if actual_macro_cols_in_df:
+            self.macro_scaler.fit(self.df[actual_macro_cols_in_df].values)
+        elif macro_cols_to_fit: # If macro columns were expected but not found in df
+            print(f"Warning: Macro columns {macro_cols_to_fit} configured but not all found in DataFrame for macro_scaler fitting. Found: {actual_macro_cols_in_df}")
+
 
     def _setup_spaces(self):
-        # Action space: [-1, 1] for each stock, where:
-        # -1 = sell all shares, 1 = buy with all available cash
-        self.action_space = spaces.Box(
-            low=-1.0, 
-            high=1.0, 
-            shape=(self.num_stocks,), 
-            dtype=np.float32
-        )
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_stocks,), dtype=np.float32)
 
-        # Observation space components
-        cash_shares_length = 1 + self.num_stocks  # cash + shares per stock
-        price_features = 5 * self.num_stocks      # OHLCV per stock
-        tech_features = (3 + 2 + len(self.tech_indicator_list)) * self.num_stocks  # earnings, pe, volatility, momentum, volume_trend + tech
-        macro_features = 3                        # snp500, gold, inflation, rates
-        
-        total_features = cash_shares_length + price_features + tech_features + macro_features
-        
-        self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(total_features,), 
-            dtype=np.float32
+        cash_shares_len = 1 + self.num_stocks # Cash + shares_per_stock
+        price_features_len = len(self._price_columns_template) * self.num_stocks
+        fundamental_features_len = len(self._fundamental_columns_template) * self.num_stocks
+        ta_features_len = len(self._ta_columns_template) * self.num_stocks
+        macro_features_len = len(self._macro_columns_template) # These are already full names
+
+        total_obs_features = (
+            cash_shares_len +
+            price_features_len +
+            fundamental_features_len +
+            ta_features_len +
+            macro_features_len
         )
+        
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(total_obs_features,), dtype=np.float32)
+        if self.reward_params.get('debug', False): # Print only if debug is true
+            print(f"Observation space dimension: {total_obs_features}")
+            print(f"  Breakdown: Cash/Shares={cash_shares_len} (1+{self.num_stocks}), "
+                  f"Prices={price_features_len} ({len(self._price_columns_template)}x{self.num_stocks}), "
+                  f"Fundamentals={fundamental_features_len} ({len(self._fundamental_columns_template)}x{self.num_stocks}), "
+                  f"TAs={ta_features_len} ({len(self._ta_columns_template)}x{self.num_stocks}), "
+                  f"Macro={macro_features_len} ({len(self._macro_columns_template)})")
 
     def reset(self, *, seed=None, options=None):
         self.seed = seed or self.seed
@@ -209,47 +313,54 @@ class MultiStockTradingEnv(gym.Env):
     def _get_obs(self):
         # Normalize cash and shares
         cash_normalized = np.array([self.cash / self.initial_amount], dtype=np.float32)
-        # Avoid division by zero if hmax_per_stock can be zero, though unlikely by design
-        hmax_safe = np.where(self.hmax_per_stock == 0, 1, self.hmax_per_stock)
+        hmax_safe = np.where(self.hmax_per_stock == 0, 1, self.hmax_per_stock) # Avoid division by zero
         shares_normalized = self.shares / hmax_safe
         
-        # Price features
-        price_data = []
+        # Prepare data for scaling
+        current_price_data_flat = []
         for i in range(self.num_stocks):
-            price_data.extend([
-                self.data[f'open_{i}'], self.data[f'high_{i}'],
-                self.data[f'low_{i}'], self.data[f'close_{i}'],
-                self.data[f'volume_{i}']
-            ])
-        scaled_prices = self.price_scaler.transform([price_data])[0]
-        
-        # Technical features
-        tech_data = []
+            for col_stem in self._price_columns_template: # e.g. 'open', 'close'
+                current_price_data_flat.append(self.data[f"{col_stem}_{i}"])
+
+        current_per_stock_other_flat = [] # Fundamentals and TAs
         for i in range(self.num_stocks):
-            tech_data.extend([
-                self.data[f'eps_{i}'], self.data[f'pe_ratio_{i}'],
-                self.data[f'volatility_30d_{i}'], self.data[f'momentum_{i}'],
-                self.data[f'volume_trend_{i}']
-            ])
-            tech_data.extend([self.data[f'{tech}_{i}'] for tech in self.tech_indicator_list])
-        scaled_tech = self.tech_scaler.transform([tech_data])[0]
-        
-        # Macro features
-        macro_data = [
-            self.data['snp500'], self.data['gold_price'],
-             self.data['interest_rate']
+            for col_stem in self._fundamental_columns_template: # e.g. 'eps', 'volatility_30d'
+                 current_per_stock_other_flat.append(self.data[f"{col_stem}_{i}"])
+            for col_stem in self._ta_columns_template: # e.g. 'sma_50', 'macd_12_26_9'
+                 current_per_stock_other_flat.append(self.data[f"{col_stem}_{i}"])
+
+        current_macro_data_flat = []
+        if self._macro_columns_template: # Only if macro features are configured
+            actual_macro_cols_in_df = [col for col in self._macro_columns_template if col in self.data]
+            current_macro_data_flat = [self.data[col] for col in actual_macro_cols_in_df]
+            # If some configured macro columns were missing from df, scaler might complain or give wrong shape.
+            # _initialize_scalers fits on actual_macro_cols_in_df, so this should align.
+            # If a column was expected by _macro_columns_template but not in df, it won't be added here.
+            # This means the observation might be shorter than defined IF macro columns can be entirely missing from df.
+            # _validate_data should prevent this. If a macro column is all NaNs, it's still a column.
+
+        # Scale features
+        # Ensure data list is not empty before trying to scale
+        scaled_prices = self.price_scaler.transform([current_price_data_flat])[0] if current_price_data_flat else np.array([])
+        scaled_per_stock_other = self.per_stock_other_features_scaler.transform([current_per_stock_other_flat])[0] if current_per_stock_other_flat else np.array([])
+        scaled_macro = self.macro_scaler.transform([current_macro_data_flat])[0] if current_macro_data_flat and hasattr(self.macro_scaler, 'mean_') else np.array([]) # Check if macro_scaler was fit
+
+        obs_list = [
+            cash_normalized, shares_normalized,
+            scaled_prices, scaled_per_stock_other, scaled_macro
         ]
-        scaled_macro = self.macro_scaler.transform([macro_data])[0]
         
-        # Concatenate all features
-        obs = np.concatenate([
-            cash_normalized,
-            shares_normalized,
-            scaled_prices,
-            scaled_tech,
-            scaled_macro
-        ]).astype(np.float32)
-        
+        # Filter out empty arrays before concatenation (e.g. if no macro features or no TAs)
+        obs = np.concatenate([arr for arr in obs_list if arr.size > 0]).astype(np.float32)
+
+        expected_len = self.observation_space.shape[0]
+        if len(obs) != expected_len:
+            # This error indicates a mismatch between _setup_spaces and _get_obs feature collection
+            raise ValueError(f"Observation length mismatch. Expected {expected_len}, got {len(obs)}. "
+                             f"Cash/Shares: {len(cash_normalized)}+{len(shares_normalized)} = {len(cash_normalized)+len(shares_normalized)}, "
+                             f"Prices: {len(scaled_prices)} (expected {len(self._price_columns_template)*self.num_stocks}), "
+                             f"PerStockOther (Fund+TA): {len(scaled_per_stock_other)} (expected {(len(self._fundamental_columns_template)+len(self._ta_columns_template))*self.num_stocks}), "
+                             f"Macro: {len(scaled_macro)} (expected {len(self._macro_columns_template)})")
         return obs
 
     def step(self, action: np.ndarray):

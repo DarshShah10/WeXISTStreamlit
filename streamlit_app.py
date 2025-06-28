@@ -17,22 +17,32 @@ from src.utils import load_config # Import the config loader
 from src.data_preprocessing.DataPreprocessingPipeline import StockPreProcessPipeline
 from src.envs.trading_env import MultiStockTradingEnv
 
-# Import functions from train.py (now config-driven) and test.py
+# Import functions from train.py (now config-driven)
 from train import create_env, run_training_programmatically
-from test import calculate_metrics, plot_performance, run_evaluation # Assuming test.py is not yet config-driven
+# Removed imports from test.py as BaseBacktester handles metrics/plots
+# from test import calculate_metrics, plot_performance, run_evaluation
 
-# --- Global Configuration ---
-try:
-    CONFIG = load_config()
-    PROJECT_ROOT = CONFIG.get('project_root', os.path.dirname(os.path.abspath(__file__))) # Fallback for PROJECT_ROOT
-except Exception as e:
-    logging.error(f"Failed to load configuration for Streamlit app: {e}")
-    st.error(f"Critical Error: Could not load configuration. App functionality will be limited. Details: {e}")
-    CONFIG = {} # Initialize to empty dict to prevent KeyErrors, but app might not work
-    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Import new backtester classes
+from src.envs.backtest import TD3Backtester
+from src.envs.backtestppo import RecurrentPPOBacktester
+# Add other specific backtesters if needed, e.g. from src.envs.backtesta2c import A2CBacktester
+
+# --- Global Configuration & Session State Initialisation ---
+if 'config' not in st.session_state:
+    try:
+        st.session_state.config = load_config()
+        # PROJECT_ROOT is already part of the config loaded by load_config
+    except Exception as e:
+        logging.error(f"Critical: Failed to load configuration at Streamlit app start: {e}")
+        st.error(f"CRITICAL ERROR: Could not load configuration. App cannot start. Details: {e}")
+        # Stop further execution if config fails, as it's critical
+        st.stop()
+
+CONFIG = st.session_state.config # Use config from session state
+PROJECT_ROOT = CONFIG.get('project_root', os.path.dirname(os.path.abspath(__file__)))
 
 
-# Use paths from CONFIG. config_loader should make them absolute.
+# Use paths from CONFIG.
 # If not, construct them using PROJECT_ROOT. For now, assume they are absolute or correctly relative.
 MODEL_SAVE_DIR = CONFIG.get('model_dir', os.path.join(PROJECT_ROOT, 'models'))
 DATA_DIR = CONFIG.get('data_dir', os.path.join(PROJECT_ROOT, 'data'))
@@ -166,18 +176,16 @@ st.set_page_config(page_title=CONFIG.get("streamlit_app_title", "RL Trading Dash
 st.title(f"🤖 {CONFIG.get('streamlit_app_title', 'Reinforcement Learning Trading Dashboard')}")
 
 
-if "selected_model_info" not in st.session_state:
-    st.session_state.selected_model_info = None
-if "model" not in st.session_state:
-    st.session_state.model = None
-if "vec_env" not in st.session_state:
-    st.session_state.vec_env = None
-if "processed_data_df" not in st.session_state:
-    st.session_state.processed_data_df = None
-if "backtest_results" not in st.session_state:
-    st.session_state.backtest_results = None
-if "processed_train_data_path" not in st.session_state:
-    st.session_state.processed_train_data_path = None
+# Initialize session state variables if they don't exist
+# This helps maintain state across reruns and tabs
+if "selected_model_info" not in st.session_state: st.session_state.selected_model_info = None
+# Remove old model and vec_env from session state as BaseBacktester handles this internally for its run
+# if "model" not in st.session_state: st.session_state.model = None
+# if "vec_env" not in st.session_state: st.session_state.vec_env = None
+if "processed_data_df_for_backtest" not in st.session_state: st.session_state.processed_data_df_for_backtest = None # More specific name
+if "backtest_metrics_dict" not in st.session_state: st.session_state.backtest_metrics_dict = None # For metrics dict
+if "backtest_results_df" not in st.session_state: st.session_state.backtest_results_df = None # For results df
+if "processed_train_data_path" not in st.session_state: st.session_state.processed_train_data_path = None
 
 st.sidebar.header("⚙️ Configuration")
 
@@ -360,9 +368,9 @@ with tab_inference_backtesting:
 
     if not st.session_state.selected_model_info:
         st.warning("Please select a model from the sidebar.")
-    elif not selected_tickers:
+    elif not selected_tickers: # selected_tickers is from sidebar
         st.warning("Please enter at least one stock ticker in the sidebar.")
-    elif start_date >= end_date:
+    elif start_date >= end_date: # start_date and end_date from sidebar
         st.error("Error: Start date must be before end date.")
     else:
         st.write(f"**Selected Model**: {st.session_state.selected_model_info['name']}")
@@ -370,81 +378,142 @@ with tab_inference_backtesting:
         st.write(f"**Date Range**: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
         if st.button("🚀 Process Data & Run Backtest", key="btn_run_backtest"):
-            st.session_state.processed_data_df = None # Reset states
-            st.session_state.model = None
-            st.session_state.vec_env = None
-            st.session_state.backtest_results = None
+            st.session_state.processed_data_df_for_backtest = None
+            st.session_state.backtest_metrics_dict = None
+            st.session_state.backtest_results_df = None
+            backtester_output_dir_for_run = None # To store and display path to backtester's unique output dir
 
+            processed_data_csv_path = None
             with st.spinner("Processing data for backtesting..."):
                 try:
                     os.makedirs(APP_TEMP_DATA_DIR, exist_ok=True)
                     sorted_selected_tickers_str = "_".join(sorted(selected_tickers))
-                    # Use a different filename prefix for backtest data to distinguish from training process data
-                    output_filename = f"backtest_data_{sorted_selected_tickers_str}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
-                    output_csv_path = os.path.join(APP_TEMP_DATA_DIR, output_filename)
+                    output_filename = f"backtest_app_data_{sorted_selected_tickers_str}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
+                    processed_data_csv_path = os.path.join(APP_TEMP_DATA_DIR, output_filename)
 
-                    pipeline = StockPreProcessPipeline(config=CONFIG) # Pass global CONFIG
-                    processed_path = pipeline.run_data_pipeline(
+                    pipeline = StockPreProcessPipeline(config=st.session_state.config)
+                    processed_data_csv_path = pipeline.run_data_pipeline(
                         selected_tickers,
                         start_date.strftime('%Y-%m-%d'),
                         end_date.strftime('%Y-%m-%d'),
-                        output_csv_path
+                        processed_data_csv_path
                     )
-                    data_df = pd.read_csv(processed_path)
-                    data_df["Date"] = pd.to_datetime(data_df["Date"])
-                    data_df.set_index("Date", inplace=True)
-                    st.session_state.processed_data_df = data_df
-                    st.success(f"Data processed successfully! Shape: {data_df.shape}")
+                    if processed_data_csv_path and os.path.exists(processed_data_csv_path):
+                        st.success(f"Data processed successfully! Saved to: {processed_data_csv_path}")
+                    else:
+                        st.error("Data processing failed to produce an output file.")
+                        st.stop()
                 except Exception as e:
                     st.error(f"Error during data processing: {e}")
                     st.exception(e)
+                    st.stop()
 
-            if st.session_state.processed_data_df is not None and not st.session_state.processed_data_df.empty:
-                with st.spinner("Loading model and preparing environment..."):
+            if processed_data_csv_path and os.path.exists(processed_data_csv_path):
+                with st.spinner("Running backtest with selected model..."):
                     try:
-                        num_processed_stocks = len(selected_tickers) # Should use unique tickers from df if possible
-                        if 'Ticker' in st.session_state.processed_data_df.columns:
-                             num_processed_stocks = st.session_state.processed_data_df['Ticker'].nunique()
+                        model_info = st.session_state.selected_model_info
+                        model_file_path = model_info['model_path']
+                        model_name_lower = model_info['name'].lower()
+                        env_stats = model_info['stats_path']
 
-                        model, vec_env = load_streamlit_model_and_env(
-                            st.session_state.selected_model_info,
-                            st.session_state.processed_data_df,
-                            num_processed_stocks,
-                            CONFIG # Pass global CONFIG
-                        )
-                        st.session_state.model = model
-                        st.session_state.vec_env = vec_env
-                    except Exception as e:
-                        st.error(f"Error loading model or environment: {e}")
-                        st.exception(e)
+                        backtester = None
+                        model_type_key = None
+                        if "td3" in model_name_lower: model_type_key = "TD3"
+                        elif "recurrentppo" in model_name_lower or "recurrent_ppo" in model_name_lower : model_type_key = "RecurrentPPO"
+                        elif "ppo" in model_name_lower: model_type_key = "PPO" # Generic PPO
+                        # Add A2C, DDPG later if needed
 
-            if st.session_state.model and st.session_state.vec_env and st.session_state.processed_data_df is not None:
-                with st.spinner("Running backtest..."):
-                    try:
-                        # Ensure run_evaluation uses initial_amount from config if not passed or returned by it
-                        initial_amount_for_metrics = CONFIG.get('initial_amount', 100000.0)
-                        portfolio_values, daily_returns = run_evaluation(
-                            st.session_state.model,
-                            st.session_state.vec_env,
-                            st.session_state.processed_data_df
-                        )
-                        st.session_state.backtest_results = (portfolio_values, daily_returns, initial_amount_for_metrics)
-                        st.success("Backtest completed!")
+                        if model_type_key == "TD3":
+                            backtester = TD3Backtester(
+                                model_path=model_file_path, env_stats_path=env_stats,
+                                config=st.session_state.config, ticker_list=selected_tickers
+                            )
+                        elif model_type_key == "RecurrentPPO" or model_type_key == "PPO": # Fallback PPO to RecurrentPPOBacktester for now
+                            if model_type_key == "PPO":
+                                st.warning("Generic PPO model type inferred, using RecurrentPPOBacktester. Create a specific PPOBacktester if needed.")
+                            backtester = RecurrentPPOBacktester(
+                                model_path=model_file_path, env_stats_path=env_stats,
+                                config=st.session_state.config, ticker_list=selected_tickers
+                            )
+                        else:
+                            st.error(f"Could not determine appropriate backtester for model: {model_info['name']}. Supported keywords: TD3, RecurrentPPO, PPO.")
+                            st.stop()
+
+                        if backtester:
+                            backtester_output_dir_for_run = backtester.output_dir
+                            metrics, results_df = backtester.run_full_backtest(backtest_data_source=processed_data_csv_path)
+
+                            st.session_state.backtest_metrics_dict = metrics
+                            st.session_state.backtest_results_df = results_df
+                            st.success("Backtest completed!")
+                            if backtester_output_dir_for_run:
+                                st.info(f"Backtest artifacts (results CSV, plots, metrics txt) saved in: {backtester_output_dir_for_run}")
+                        else:
+                            st.error("Backtester could not be initialized.")
                     except Exception as e:
                         st.error(f"Error during backtest execution: {e}")
                         st.exception(e)
 
-    if st.session_state.backtest_results:
-        st.subheader("Backtest Results")
-        portfolio_values, daily_returns, initial_amount_metrics = st.session_state.backtest_results
+    # Display results if available in session state
+    if st.session_state.backtest_metrics_dict and st.session_state.backtest_results_df is not None:
+        st.subheader("Backtest Performance Metrics")
+        metrics_to_display = st.session_state.backtest_metrics_dict
 
-        if not portfolio_values or len(portfolio_values) < 2:
-            st.warning("Not enough data in portfolio values to display metrics.")
+        num_metrics = len(metrics_to_display)
+        max_cols = 4
+        num_rows = (num_metrics + max_cols - 1) // max_cols
+        metric_items = list(metrics_to_display.items())
+        item_idx = 0
+        for _ in range(num_rows):
+            cols = st.columns(min(num_metrics - item_idx, max_cols))
+            for col_idx in range(len(cols)):
+                if item_idx < num_metrics:
+                    key, value = metric_items[item_idx]
+                    cols[col_idx].metric(label=str(key), value=str(value)) # Ensure value is string
+                    item_idx += 1
+
+        st.subheader("Performance Plots (from DataFrame)")
+        results_df_for_plot = st.session_state.backtest_results_df.copy()
+
+        # Ensure index is DatetimeIndex for plotting
+        # BaseBacktester sets 'current_date' as index and sorts it.
+        if not isinstance(results_df_for_plot.index, pd.DatetimeIndex):
+            if 'current_date' in results_df_for_plot.columns: # If it was reset
+                 results_df_for_plot['current_date'] = pd.to_datetime(results_df_for_plot['current_date'])
+                 results_df_for_plot.set_index('current_date', inplace=True)
+            elif results_df_for_plot.index.name == 'Date': # if it was reset and index became 'Date'
+                 results_df_for_plot.index = pd.to_datetime(results_df_for_plot.index)
+            # else: Fallback, index might be non-datetime, plots might look odd.
+
+        if 'portfolio_value' in results_df_for_plot.columns:
+            fig_pv = go.Figure()
+            fig_pv.add_trace(go.Scatter(x=results_df_for_plot.index, y=results_df_for_plot['portfolio_value'],
+                                        mode='lines', name='Portfolio Value'))
+            fig_pv.update_layout(title_text="Portfolio Value Over Time", xaxis_title="Date", yaxis_title="Portfolio Value ($)", height=500)
+            st.plotly_chart(fig_pv, use_container_width=True)
         else:
-            metrics, portfolio_df_series = calculate_metrics(portfolio_values, daily_returns, initial_amount=initial_amount_metrics)
-            valid_metrics = {k: v for k, v in metrics.items() if v is not None}
-            # ... (metrics display logic remains similar) ...
-            num_metrics = len(valid_metrics)
+            st.warning("Portfolio value data not found in results for plotting.")
+
+        # BaseBacktester's _calculate_and_log_metrics adds 'drawdown_pct' and 'daily_returns'
+        if 'drawdown_pct' in results_df_for_plot.columns:
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=results_df_for_plot.index, y=-results_df_for_plot['drawdown_pct'],
+                                         mode='lines', name='Drawdown', fill='tozeroy', line=dict(color='red')))
+            fig_dd.update_layout(title_text="Drawdown Percentage Over Time", xaxis_title="Date", yaxis_title="Drawdown (%)", height=400)
+            st.plotly_chart(fig_dd, use_container_width=True)
+        else:
+            st.warning("Drawdown percentage data not found for plotting.")
+
+        if 'daily_returns' in results_df_for_plot.columns and not results_df_for_plot['daily_returns'].empty:
+            fig_returns_dist = px.histogram(x=results_df_for_plot['daily_returns'] * 100, nbins=50, title="Distribution of Daily Returns")
+            fig_returns_dist.update_layout(xaxis_title="Daily Return (%)", yaxis_title="Frequency", height=400)
+            st.plotly_chart(fig_returns_dist, use_container_width=True)
+        else:
+            st.warning("Daily returns data not found or empty for plotting distribution.")
+
+with tab_model_info:
+    st.header("Model and Environment Information")
+    if st.session_state.selected_model_info:
             max_cols = 4
             num_rows = (num_metrics + max_cols - 1) // max_cols
             metric_items = list(valid_metrics.items())
