@@ -111,47 +111,8 @@ class MultiStockTradingEnv(gym.Env):
         df.fillna(method='bfill', inplace=True)
         return df
 
-    def _get_expected_ta_column_stems(self, indicator_name_from_config: str) -> list[str]:
-        """
-        Helper to get the actual column name stems pandas-ta generates for a given config name.
-        These are lowercased as per DataMerger's processing.
-        Note: This mapping MUST align with FeatureEngineer.py's pandas_ta calls and DataMerger.py's lowercasing.
-        Default parameters are assumed for indicators like MACD, BBANDS, STOCH, ADX if not specified otherwise
-        in FeatureEngineer's call to pandas-ta.
-        """
-        name = indicator_name_from_config.lower().strip()
-        # Simple 1-to-1 mappings (where pandas-ta output name is just the indicator name + params)
-        if name == 'sma50': return ['sma_50']
-        if name == 'sma200': return ['sma_200']
-        if name == 'ema12': return ['ema_12']
-        if name == 'ema26': return ['ema_26']
-        if name == 'rsi': return ['rsi_14'] # Default length 14
-        if name == 'obv': return ['obv']
-        if name == 'cci': return ['cci_14_0.015'] # Default params for pandas-ta cci
-        if name == 'volume_sma_20': return ['volsma_20'] # Assuming FeatureEngineer creates 'VOLSMA_20' then it's lowercased by DataMerger
-
-        # Indicators that generate multiple columns
-        if name == 'macd': return ['macd_12_26_9', 'macdh_12_26_9', 'macds_12_26_9'] # Default params
-        if name == 'bbands': return ['bbl_5_2.0', 'bbm_5_2.0', 'bbu_5_2.0', 'bbb_5_2.0', 'bbp_5_2.0'] # Default params
-        if name == 'stoch': return ['stochk_14_3_3', 'stochd_14_3_3'] # Default params for STOCH
-        if name == 'adx': return ['adx_14', 'dmp_14', 'dmn_14'] # Default params for ADX
-
-        # For 'stoch_k' or 'stoch_d' if they were separate in config (they are part of 'stoch' output)
-        if name == 'stoch_k': return ['stochk_14_3_3']
-        if name == 'stoch_d': return ['stochd_14_3_3']
-        # For bbands components if listed separately in config
-        if name == 'bb_upper': return ['bbu_5_2.0']
-        if name == 'bb_middle': return ['bbm_5_2.0']
-        if name == 'bb_lower': return ['bbl_5_2.0']
-
-        # Fallback: if a name from config.tech_indicator_list isn't explicitly mapped above,
-        # assume it's a direct pandas-ta indicator name (already lowercased).
-        # This requires user to ensure config name matches pandas-ta's naming convention for simple indicators.
-        # E.g., if config has 'atr', pandas-ta might produce 'ATR_14' by default. This needs alignment.
-        # A more robust solution might involve inspecting pandas_ta's available indicators or having a stricter config format.
-        print(f"Warning: TA indicator '{name}' from config not explicitly mapped in _get_expected_ta_column_stems. Assuming direct name match (e.g., if config is 'atr', expects 'atr_14' or similar based on pandas-ta default).")
-        return [name]
-
+    # The _get_expected_ta_column_stems method is no longer needed as the
+    # config now directly provides the output_columns for each TA.
 
     def _validate_data(self):
         """
@@ -183,14 +144,25 @@ class MultiStockTradingEnv(gym.Env):
 
         # 3. Technical indicators (from pandas-ta via FeatureEngineer, then lowercased + suffixed by DataMerger)
         self._ta_columns_template = [] # This will store unique stems, e.g., 'sma_50', 'macd_12_26_9'
-        configured_tech_indicators = self.config.get('tech_indicator_list', [])
 
-        for ti_config_name in configured_tech_indicators:
-            stems = self._get_expected_ta_column_stems(ti_config_name)
-            self._ta_columns_template.extend(stems)
+        # tech_indicator_list from config is now a list of dicts
+        configured_tech_indicators_dicts = self.config.get('tech_indicator_list', [])
+        if not isinstance(configured_tech_indicators_dicts, list) or \
+           not all(isinstance(item, dict) for item in configured_tech_indicators_dicts):
+            raise ValueError("Config key 'tech_indicator_list' must be a list of dictionaries.")
+
+        for ti_dict in configured_tech_indicators_dicts:
+            if "output_columns" not in ti_dict or not isinstance(ti_dict["output_columns"], list):
+                raise ValueError(f"Each item in 'tech_indicator_list' must have an 'output_columns' list. Problem with: {ti_dict.get('name', 'Unnamed TA')}")
+            # output_columns are already expected to be the correct stems, lowercased.
+            self._ta_columns_template.extend(ti_dict["output_columns"])
 
         # Remove duplicates from _ta_columns_template if any indicator (like 'stoch' and 'stoch_k') generates overlapping stems
         self._ta_columns_template = sorted(list(set(self._ta_columns_template)))
+
+        # Store the names of the configured TAs for reference if needed (e.g. for debugging)
+        self.configured_ta_names = [d.get('name', 'Unnamed TA') for d in configured_tech_indicators_dicts]
+
 
         for i in range(self.num_stocks):
             self._all_expected_columns.extend([f"{col}_{i}" for col in self._ta_columns_template])
@@ -205,10 +177,11 @@ class MultiStockTradingEnv(gym.Env):
             print(f"DataFrame columns available: {sorted(self.df.columns.tolist())}")
             print(f"Expected price col stems: {self._price_columns_template}")
             print(f"Expected fund col stems: {self._fundamental_columns_template}")
-            print(f"Configured TAs: {configured_tech_indicators} -> Expected TA col stems: {self._ta_columns_template}")
+            print(f"Configured TA names from config: {self.configured_ta_names}")
+            print(f"Derived expected TA col stems: {self._ta_columns_template}")
             print(f"Expected macro cols: {self._macro_columns_template}")
             raise AssertionError(f"Missing required columns in combined DataFrame: {missing_columns}. "
-                                 "Check FeatureEngineer output, DataMerger suffixing, and TA indicator naming in config and _get_expected_ta_column_stems.")
+                                 "Check FeatureEngineer output, DataMerger suffixing, and 'output_columns' in 'tech_indicator_list' in config.")
         
     def _initialize_scalers(self):
         self.price_scaler = StandardScaler()
@@ -401,11 +374,13 @@ class MultiStockTradingEnv(gym.Env):
         # daily_return is the same as portfolio_return for single step
         self.daily_returns.append(portfolio_return)
 
-        # Reward calculation now uses self.reward_params internally
-        reward = self._calculate_reward(prev_value, portfolio_return, action)
+        # Simplified Reward: change in portfolio value
+        # The original complex reward calculation is preserved below, commented out,
+        # in case it's needed for future experimentation.
+        reward = self.portfolio_value - prev_value
 
-        # update_weights is now non-adaptive or uses fixed weights from self.reward_params
-        self.update_weights() # Simplified call
+        # update_weights is not strictly necessary for this simplified reward.
+        # self.update_weights()
 
         scaled_reward = reward * self.reward_scaling # self.reward_scaling from __init__/config
         self.asset_memory.append(self.portfolio_value)
@@ -509,51 +484,52 @@ class MultiStockTradingEnv(gym.Env):
         self.drawdown = (self.peak_value - self.portfolio_value) / self.peak_value
         self.max_drawdown = max(self.max_drawdown, self.drawdown)
 
-    def _calculate_reward(self, prev_portfolio_value: float, current_portfolio_return: float, action: np.ndarray):
-        """
-        Calculate reward based on portfolio performance and risk.
-        Uses self.reward_params for all parameters.
-        """
-        # Use self.weights which are now set from fixed_reward_weights in reward_params or defaults
-        weights = self.weights
-
-        # Smoothed return over a lookback window from self.reward_params
-        lookback = self.reward_params.get('lookback_window', self.lookback_window)
-        # Ensure daily_returns has enough data for mean calculation
-        smoothed_return = np.mean(self.daily_returns[-lookback:]) if len(self.daily_returns) >= lookback else current_portfolio_return
-        
-        f_profit = self.calculate_profit_term(smoothed_return) # Pass only necessary arg
-
-        penalty_risk = self.calculate_risk_penalty() # Uses self.daily_returns, self.portfolio_value
-        penalty_drawdown = self.calculate_drawdown_penalty() # Uses self.drawdown, self.portfolio_value
-        penalty_action = self.calculate_action_penalty(current_portfolio_return, action)
-
-        # Scale down penalties to reduce their impact - this logic can be part of reward_params
-        penalty_scaling = self.reward_params.get('penalty_scaling_factor', 0.2)
-        max_total_penalty = self.reward_params.get('max_total_penalty_clamp', 0.2)
-
-        total_penalty = penalty_scaling * (penalty_risk + penalty_drawdown + penalty_action)
-        total_penalty = min(total_penalty, max_total_penalty)
-
-        volatility = np.std(self.daily_returns[-lookback:]) if len(self.daily_returns) >= lookback else 1e-6
-        sharpe_ratio_component = self.reward_params.get('sharpe_ratio_weight', 0.5) * (smoothed_return / (volatility + 1e-6))
-
-        reward = (
-            weights['w_profit'] * f_profit +
-            sharpe_ratio_component - # Add risk-adjusted returns
-            total_penalty # Subtract scaled penalties
-        )
-
-        # Final scaling factor for reward magnitude, from reward_params
-        final_reward_scaling = self.reward_params.get('reward_scaling_factor', 1e2) # This is different from self.reward_scaling
-        reward *= final_reward_scaling
-  
-        if self.reward_params.get('debug', False):
-            print(f"CalcReward - Return: {current_portfolio_return:.4f}, SmoothRet: {smoothed_return:.4f}, "
-                  f"f_profit: {f_profit:.4f}, P_risk: {penalty_risk:.4f}, P_drawdown: {penalty_drawdown:.4f}, "
-                  f"P_action: {penalty_action:.4f}, TotalPenalty: {total_penalty:.4f}, SharpeComp: {sharpe_ratio_component:.4f}, "
-                  f"FinalReward: {reward:.4f}")
-        return reward
+    # def _calculate_reward(self, prev_portfolio_value: float, current_portfolio_return: float, action: np.ndarray):
+    #     """
+    #     ORIGINAL COMPLEX REWARD CALCULATION (Commented out for simplification)
+    #     Calculate reward based on portfolio performance and risk.
+    #     Uses self.reward_params for all parameters.
+    #     """
+    #     # Use self.weights which are now set from fixed_reward_weights in reward_params or defaults
+    #     weights = self.weights
+    #
+    #     # Smoothed return over a lookback window from self.reward_params
+    #     lookback = self.reward_params.get('lookback_window', self.lookback_window)
+    #     # Ensure daily_returns has enough data for mean calculation
+    #     smoothed_return = np.mean(self.daily_returns[-lookback:]) if len(self.daily_returns) >= lookback else current_portfolio_return
+    #
+    #     f_profit = self.calculate_profit_term(smoothed_return) # Pass only necessary arg
+    #
+    #     penalty_risk = self.calculate_risk_penalty() # Uses self.daily_returns, self.portfolio_value
+    #     penalty_drawdown = self.calculate_drawdown_penalty() # Uses self.drawdown, self.portfolio_value
+    #     penalty_action = self.calculate_action_penalty(current_portfolio_return, action)
+    #
+    #     # Scale down penalties to reduce their impact - this logic can be part of reward_params
+    #     penalty_scaling = self.reward_params.get('penalty_scaling_factor', 0.2)
+    #     max_total_penalty = self.reward_params.get('max_total_penalty_clamp', 0.2)
+    #
+    #     total_penalty = penalty_scaling * (penalty_risk + penalty_drawdown + penalty_action)
+    #     total_penalty = min(total_penalty, max_total_penalty)
+    #
+    #     volatility = np.std(self.daily_returns[-lookback:]) if len(self.daily_returns) >= lookback else 1e-6
+    #     sharpe_ratio_component = self.reward_params.get('sharpe_ratio_weight', 0.5) * (smoothed_return / (volatility + 1e-6))
+    #
+    #     reward = (
+    #         weights['w_profit'] * f_profit +
+    #         sharpe_ratio_component - # Add risk-adjusted returns
+    #         total_penalty # Subtract scaled penalties
+    #     )
+    #
+    #     # Final scaling factor for reward magnitude, from reward_params
+    #     final_reward_scaling = self.reward_params.get('reward_scaling_factor', 1e2) # This is different from self.reward_scaling
+    #     reward *= final_reward_scaling
+    #
+    #     if self.reward_params.get('debug', False):
+    #         print(f"CalcReward - Return: {current_portfolio_return:.4f}, SmoothRet: {smoothed_return:.4f}, "
+    #               f"f_profit: {f_profit:.4f}, P_risk: {penalty_risk:.4f}, P_drawdown: {penalty_drawdown:.4f}, "
+    #               f"P_action: {penalty_action:.4f}, TotalPenalty: {total_penalty:.4f}, SharpeComp: {sharpe_ratio_component:.4f}, "
+    #               f"FinalReward: {reward:.4f}")
+    #     return reward
 
     def _check_stop_loss(self):
         triggered = False

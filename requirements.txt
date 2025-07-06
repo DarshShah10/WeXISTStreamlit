@@ -24,7 +24,7 @@ stable-baselines3[extra]  # Includes extra dependencies like OpenAI Gym wrappers
 sb3-contrib  # Additional algorithms for Stable-Baselines3
 
 # Environment-Specific
-git+https://github.com/DLR-RM/stable-baselines3.git  # Latest stable-baselines3 updates
+git+https://github.com/DLR-RM/stable-baselines3.git@ea913a848242b2fca3cbcac255097e1d144207df  # Pinned to v2.6.0
 
 # Logging
 logging  # Python's built-in logging, no need to install separately
